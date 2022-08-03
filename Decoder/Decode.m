@@ -550,9 +550,10 @@ end
 
         % 初始化
         ResetDecoder();
-        ReadTwoBytes();
+        data_length = ReadTwoBytes();
         [Decoder.ACTbls,Decoder.DCTbls] = deal([]);
         Channels = ReadOneByte();
+        data_length = data_length - 3;
         % 指定熵编码的编码表
         for i = 1:Channels
             ChannelIdx = ReadOneByte();
@@ -560,11 +561,12 @@ end
             Decoder.DCTbls(ChannelIdx) = bitshift(identifier,-4);
             Decoder.ACTbls(ChannelIdx) = bitand(identifier,15);
             Decoder.Channels = [Decoder.Channels ChannelIdx];
+            data_length = data_length-2;
         end
         % 指定累进编码的初始频带和终止频带
         Decoder.Ss = ReadOneByte();
         Decoder.Se = ReadOneByte();
-
+        
         if Decoder.Se == 0
             Band = '的DC系数';
         else
@@ -583,6 +585,8 @@ end
         % 指定逐次逼近的最高位和最低位
         Decoder.Al = ReadFourBits();
         Decoder.Ah = ReadFourBits();
+        data_length = data_length - 1;
+        assert(data_length == 0,'Bad Data Length of SOS.')
         fprintf('第%d次SOS.解码%s\n',Decoder.SOScnt,strcat(STR,Band))
     end
     function [VALUE] = RECEIVE(SSSS)

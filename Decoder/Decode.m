@@ -140,56 +140,87 @@ end
         % 色度通道水平方向和数值方向分别解码两列（行）。系数的解码和存储方式也
         % 是累进编码和基线编码的一个主要不同点，即非交错存储和交错存储。
         % 循环，解码指定通道的指定系数
-        Decoder.block_idx = [1,1,1];
-        for i = 1:Decoder.MCUs
-           DecodeMCU();
+        c1 = Decoder.channel_info.MCUs_per_row;
+        c2 = Decoder.channel_info.MCUs_per_col;
+        for r = 0:c1-1
+            for c = 0:c2-1
+                mcu_id = r*c2 + c;
+                Decoder.DecodeMCU(mcu_id);
+            end
         end
         %完成一次解码后，要将缓存中还未处理的bits数清零
         Decoder.bitsleft = 0;
     end
-    function DecodeMCU()
-        %{
-            核心解码函数，解码指定的MCU
-        %}
-
-        % 按照SOS中指定的频带和精度分别进行解码
-
-        % DC系数解码
-        if Decoder.Ss == 0
-            if Decoder.Ah == 0
-                DecodeDCFirst();
-            else
-                DecodeDCRefine();
-            end
-            % AC系数解码
-        else
-            if Decoder.Ah == 0
-                DecodeACFirst();
-            else
-                DecodeACRefine();
-            end
-        end
-    end
-    function DecodeDCFirst()
+    function DecodeDCFirst(id)
         %{
             DC系数第一次解码，最高位
         %}
-
-        % DC系数解码时是全部通道一次解码
-        for k = 1:Decoder.blks_in_MCU
-            c_idx = Decoder.member_ship(k);
-            Htable = Decoder.dc_huff_tbl(Decoder.DCTbls(c_idx)+1);
-            % Huffman解码过程，详情见JPEG文档
-            DIFF = DECODE(Htable);
-            % DC系数通过差分存储
-            Decoder.LastDCVal(c_idx) = Decoder.LastDCVal(c_idx) + DIFF;
-            % 解码结果写入缓存中
-            Decoder.Coes{c_idx}(1,Decoder.block_idx(c_idx))= ...
-            Decoder.LastDCVal(c_idx);
-            Decoder.block_idx(c_idx) = Decoder.block_idx(c_idx)+1;
+        for i = 1:Decoder.channel_info.channels
+            c = Decoder.channel_info.id(i);
+            MCU_width = Decoder.sample_factor(1,c);
+            MCU_height = Decoder.sample_factor(2,c);
+            blks = MCU_width*MCU_height;
+            Htable = Decoder.dc_huff_tbl(Decoder.channel_info.dc_tbl_id(c)+1);
+            for j = 1:MCU_width
+                for k = 1:MCU_height
+                    temp  = (j-1)*MCU_height + k;
+                    blk_idx = id * blks + temp;
+                    % Huffman解码过程，详情见JPEG文档
+                    DIFF = DECODE(Htable);
+                    % DC系数通过差分存储
+                    Decoder.LastDCVal(c) = Decoder.LastDCVal(c) + DIFF;
+                    % 解码结果写入缓存中
+                    Decoder.Coes{c}(1,blk_idx)= Decoder.LastDCVal(c);
+                end
+            end
         end
     end
-    function DecodeDCRefine()
+    function DecodeACFirst(id)
+        %{
+            AC系数第一次解码，最高位
+        %}
+        % EOB run length,如果当前频带以后的频带都为0，则用EOBRUN表示
+        EOBRUN = Decoder.EOBRUN;
+        c = Decoder.channel_info.id;
+        tbl_id = Decoder.channel_info.ac_tbl_id(c)+1;
+        HTable = Decoder.ac_huff_tbl(tbl_id);
+        blks = Decoder.channel_info.blks_in_MCU;
+        % 开始解码，详请参阅文档。累进编码AC系数的编解码按照非交错模式进行存储
+        if EOBRUN > 0
+            EOBRUN = EOBRUN - 1;
+        else
+            c1 = Decoder.channel_info.MCU_width;
+            c2 = Decoder.channel_info.MCU_height;
+            for i = 1:c1
+                for j = 1:c2
+                    temp = (i-1)*c2 + j;
+                    id = id*blks + temp;
+                    K = Decoder.Ss+1;
+                    while K <= Decoder.Se + 1
+                        RS = DECODE(HTable,0);
+                        R = bitshift(RS,-4);             % run_length
+                        S = bitand(RS,2^4-1);            % code size
+                        if S == 0
+                            if R == 15
+                                K = K + 16;           % ZRL code
+                            else
+                                % EOB, End of Band
+                                EOBRUN = bitshift(1,R) + get_bits(R)-1;
+                                break                 % EOB，End of Block
+                            end
+                        else
+                            K = K + R;
+                            Temp = get_bits(S);
+                            Decoder.Coes{c}(K,id) = bitshift(EXTEND(Temp, S),Decoder.Al,'int64');
+                            K = K + 1;
+                        end
+                    end
+                end
+            end
+        end
+        Decoder.EOBRUN = EOBRUN;
+    end
+    function DecodeDCRefine(id)
         %{
             DC系数的修正编码，精度进一步逼近初始精度
         %}
@@ -210,89 +241,7 @@ end
             Decoder.block_idx = Decoder.block_idx + 1;
         end
     end
-    function DecodeACFirst()
-        %{
-            AC系数第一次解码，最高位
-        %}
-        HMax = max(Decoder.sample_factor(1,:));
-        blockwidth = Decoder.sample_factor(1, Decoder.Channels);
-        blockheight = Decoder.sample_factor(2, Decoder.Channels);
-
-        % 水平方向的DU个数
-        HB = max(Decoder.blks_in_hor*blockwidth/HMax);
-        P = 2^Decoder.Al;
-
-        % EOB run length,如果当前频带以后的频带都为0，则用EOBRUN表示
-        EOBRUN = Decoder.EOBRUN;
-
-        % 行/列的索引
-        [RowIdx,ColIdx] = deal(Decoder.RowIdx,Decoder.ColIdx);
-
-        % 水平/竖直方向上的第几个MCU
-        HMcuIdx = fix(ColIdx/blockwidth);
-        VMcuIdx = fix(RowIdx/blockheight);
-        
-        % MCU 索引
-        McuIdx = VMcuIdx * max(Decoder.blks_in_hor)/HMax + HMcuIdx;
-
-        % 根据不同的通道，每次解码的系数位置不同，按照 1234 5 6 的顺序
-        % 存入Coes数组中。同时指定Huffman表。
-        switch  Decoder.Channels
-            case 1
-                tbl_id = 1;
-                if mod(RowIdx,blockheight)
-                    temp = 3;
-                else
-                    temp = 1;
-                end
-            case 2
-                tbl_id = 2;
-                temp = 5;
-
-            case 3
-                tbl_id = 2;
-                temp = 6;
-        end
-        HTable = Decoder.ac_huff_tbl(Decoder.ACTbls(tbl_id)+1);
-        % 开始解码，详请参阅文档。累进编码按照非交错模式进行存储，即每次
-        % 只解码一个通道。
-        StartBlockIdx = McuIdx * sum(Decoder.blks_in_MCU_per_c) + temp;
-        EndBlockIdx = StartBlockIdx + blockwidth -1;
-        for i = StartBlockIdx : EndBlockIdx
-            K = Decoder.Ss+1;
-            if EOBRUN > 0
-                EOBRUN = EOBRUN - 1;
-            else
-                while K <= Decoder.Se + 1
-                    RS = DECODE(HTable,0);
-                    Decoder.temp(end+1) = RS;
-                    R = bitshift(RS,-4);             % run_length
-                    S = bitand(RS,2^4-1);            % code size
-                    if S == 0
-                        if R == 15
-                            K = K + 16;           % ZRL code
-                        else
-                            % EOB, End of Band
-                            EOBRUN = bitshift(1,R) + get_bits(R)-1;
-                            break                 % EOB，End of Block
-                        end
-                    else
-                        K = K + R;
-                        Temp = get_bits(S);
-                        Decoder.Coes(K,i) = EXTEND(Temp, S) * P;
-                        K = K + 1;
-                    end
-                end
-            end
-            Decoder.block_idx = Decoder.block_idx + 1;
-            Decoder.EOBRUN = EOBRUN;
-            RowIdx = fix(Decoder.block_idx/HB);
-            ColIdx = mod(Decoder.block_idx,HB);
-        end
-        Decoder.RowIdx = RowIdx;
-        Decoder.ColIdx = ColIdx;
-    end
-    function DecodeACRefine()
+    function DecodeACRefine(id)
         %{
             AC系数的修正编码，低位。基本步骤一样，同样注意符号和位或
         %}
@@ -451,52 +400,51 @@ end
     function ParseSOF()
         %{
             Start of Frame
-            这里包含了图像的精度、尺寸、通道配置，包括每个通道的采样系数和指定量化表
         %}
         data_length = ReadTwoBytes();
-        data_length = data_length-2;
-        % 图像精度、尺寸、通道数
-        ImgInfo.Precision =ReadOneByte();
-        data_length = data_length - 1; 
+        data_length = data_length - 2;
+        ImgInfo.Precision = ReadOneByte();
         ImgInfo.Height = double(ReadTwoBytes());
         ImgInfo.Width = double(ReadTwoBytes());
         ImgInfo.Channels = ReadOneByte();
-        data_length = data_length - 5;
+        data_length = data_length - 6;
         fprintf('Image precision is %d bit,with shape of %d x %d x %d.\n',...
             ImgInfo.Precision,ImgInfo.Height,ImgInfo.Width,ImgInfo.Channels);
-
-        % 通道配置，包含采样系数和该通道使用的量化表
-        for n = 1:ImgInfo.Channels
-            ChannelIdx = ReadOneByte();
-            Decoder.sample_factor(:,ChannelIdx)=...
-                [ReadFourBits(),ReadFourBits()];
-            Decoder.quanti_tbl_idx(ChannelIdx) = ReadOneByte() + 1;
-            data_length = data_length-3;
-        end
-        
-        % 水平方向和垂直方向的采样系数
-        fh_max = max(Decoder.sample_factor(1,:));
-        fv_max = max(Decoder.sample_factor(2,:));
-
-        % 水平方向和竖直方向的MCU数量
-        Decoder.MCUs_in_ver = ceil(ImgInfo.Height/fh_max/8);
-        Decoder.MCUs_in_hor = ceil(ImgInfo.Width/fv_max/8);
-        Decoder.MCUs = Decoder.MCUs_in_ver.*Decoder.MCUs_in_hor;
-
-        % 每个MCU中的DU（blks）数量，整张图像中的MCU数量
-        Decoder.blks_in_MCU_per_c = prod(Decoder.sample_factor,1);
-        Decoder.blks_in_MCU = sum(Decoder.blks_in_MCU_per_c);
         Idx = 1;
         for i = 1:ImgInfo.Channels
-            for j = 1:Decoder.blks_in_MCU_per_c(i)
+            % 通道编号和采样系数
+            c_id = ReadOneByte();
+            sample_factor = ReadOneByte();
+            sf_h = bitshift(sample_factor,-4);
+            sf_v = bitand(sample_factor,2^4-1);
+            Decoder.sample_factor(:,c_id)=[sf_h,sf_v];
+
+            % 量化表编号
+            Decoder.quanti_tbl_idx(c_id) = ReadOneByte() + 1;
+
+            % 各通道信息
+            c1 = sf_v*sf_h;
+            Decoder.blks_in_MCU(i) = c1;
+            for j = 1:c1
                 Decoder.member_ship(Idx) = i;
                 Idx = Idx + 1;
             end
-            % 累进编码和基线编码的一个重要区别就是系数的存储，需要一个较大的缓存
-            % 来存储所有的系数
-            Decoder.Coes{i} = zeros(JPEG_BLOCK_SIZE,...
-                Decoder.MCUs*Decoder.blks_in_MCU_per_c(i));
+            data_length = data_length-3;
         end
+
+        sf_h_max = max(Decoder.sample_factor(1,:));
+        sf_v_max = max(Decoder.sample_factor(2,:));
+        for i = 1:ImgInfo.Channels
+            sf_h = sf_h_max/Decoder.sample_factor(1,i);
+            sf_v = sf_v_max/Decoder.sample_factor(2,i);
+            c1 = ceil(ImgInfo.Width/8/sf_h);
+            c2 = ceil(ImgInfo.Height/8/sf_v);
+            Decoder.blks_per_row(i) = c1;
+            Decoder.blks_per_col(i) = c2;
+            Decoder.Coes{i} = zeros(JPEG_BLOCK_SIZE,c1*c2);
+        end
+        Decoder.MCUs_per_row = min(Decoder.blks_per_row);
+        Decoder.MCUs_per_col = min(Decoder.blks_per_col);
         assert (data_length == 0,'Bad Data Length of SOF.')
     end
     function ParseAPPn()
@@ -527,7 +475,7 @@ end
             temp = ReadOneByte();
             dqt_precision = bitshift(temp,-4);
             identifier = bitand(temp,2^4-1);
- 
+
             SegLength = SegLength -1;
             % 注意是小端存储，读取和存储顺序相反
             if dqt_precision == 0
@@ -550,39 +498,89 @@ end
 
         % 初始化
         ResetDecoder();
-        ReadTwoBytes();
-        [Decoder.ACTbls,Decoder.DCTbls] = deal([]);
-        Channels = ReadOneByte();
-        % 指定熵编码的编码表
-        for i = 1:Channels
-            ChannelIdx = ReadOneByte();
-            identifier = ReadOneByte();
-            Decoder.DCTbls(ChannelIdx) = bitshift(identifier,-4);
-            Decoder.ACTbls(ChannelIdx) = bitand(identifier,15);
-            Decoder.Channels = [Decoder.Channels ChannelIdx];
+        data_length = ReadTwoBytes();
+        channels = ReadOneByte();
+        Decoder.channel_info.channels = channels;
+        data_length = data_length - 3;
+        if channels == 1
+            %{
+                single component,non-interleaved save mode,
+                Noninterleaved (single-component) scan 
+            %}
+            % 当前SOS待解码的通道号和所要使用的huffman表ID
+            c = ReadOneByte();
+            id = ReadOneByte();
+            Decoder.channel_info.id = c;
+            Decoder.channel_info.dc_tbl_id = bitshift(id,-4);
+            Decoder.channel_info.ac_tbl_id = bitand(id,2^4-1);
+
+            % 当前SOS中待解码通道的MCU个数和每个MCU中的blocks个数
+            c1 = Decoder.blks_per_row(c);
+            c2 = Decoder.blks_per_col(c);
+            Decoder.channel_info.MCUs_per_row = c1;
+            Decoder.channel_info.MCUs_per_col = c2;
+            Decoder.channel_info.MCUs = c1*c2;
+            Decoder.channel_info.MCU_width = 1;
+            Decoder.channel_info.MCU_height = 1;
+            Decoder.channel_info.blks_in_MCU = 1;
+            data_length = data_length-2;
+        else
+            for i = 1:channels
+                c = ReadOneByte();
+                id = ReadOneByte();
+                Decoder.channel_info.id(i) = c;
+                Decoder.channel_info.dc_tbl_id(c)= bitshift(id,-4);
+                Decoder.channel_info.ac_tbl_id(c) = bitand(id,2^4-1);
+                data_length = data_length-2;
+            end
+            Decoder.channel_info.MCUs_per_row = Decoder.MCUs_per_row;
+            Decoder.channel_info.MCUs_per_col = Decoder.MCUs_per_col;
+            Decoder.channel_info.blks_in_MCU = sum(Decoder.blks_in_MCU);
         end
+
         % 指定累进编码的初始频带和终止频带
         Decoder.Ss = ReadOneByte();
         Decoder.Se = ReadOneByte();
+
+        % 指定逐次逼近的最高位和最低位
+        Decoder.Al = ReadFourBits();
+        Decoder.Ah = ReadFourBits();
+        data_length = data_length-3;
+
+        if Decoder.Ss == 0
+            if Decoder.Ah == 0
+                Decoder.DecodeMCU = @DecodeDCFirst;
+            else
+                Decoder.DecodeMCU = @DecodeDCRefine;
+            end
+            % AC系数解码
+        else
+            if Decoder.Ah == 0
+                Decoder.DecodeMCU = @DecodeACFirst;
+            else
+                Decoder.DecodeMCU = @DecodeACRefine;
+            end
+        end
 
         if Decoder.Se == 0
             Band = '的DC系数';
         else
             Band = '的AC系数';
         end
-        switch sum(Decoder.Channels)
-            case 6
-                STR = '全部通道';
-            case 1
-                STR ='亮度通道';
-            case 2
-                STR = '色度通道1';
-            case 3
-                STR = '色度通道2';
+        if c == 3
+            STR = '全部通道';
+        else
+            switch Decoder.channel_info.id
+                case 1
+                    STR ='亮度通道';
+                case 2
+                    STR = '色度通道1';
+                case 3
+                    STR = '色度通道2';
+            end
         end
-        % 指定逐次逼近的最高位和最低位
-        Decoder.Al = ReadFourBits();
-        Decoder.Ah = ReadFourBits();
+
+        assert(data_length==0,"Bad Data Length of SOS.")
         fprintf('第%d次SOS.解码%s\n',Decoder.SOScnt,strcat(STR,Band))
     end
     function [VALUE] = RECEIVE(SSSS)
@@ -827,7 +825,7 @@ end
             warning("Corrupt JPEG data: bad Huffman code");
         end
         try
-        re =  htbl.pub.huffval(code + htbl.valoffset(l+1));
+            re =  htbl.pub.huffval(code + htbl.valoffset(l+1));
         catch
             return
         end
@@ -841,12 +839,12 @@ end
         [Decoder.temp_buffer,Decoder.bits_in_buffer] = deal(buffer,nbits);
     end
     function re = get_bits(n)
-        % 读入n个bit数据 
+        % 读入n个bit数据
         if Decoder.bits_in_buffer < n
             jpeg_fill_buffer()
         end
         [buffer,nbits] = deal(Decoder.temp_buffer,Decoder.bits_in_buffer);
-        nbits = nbits-n;    
+        nbits = nbits-n;
         re = bitshift(buffer,-nbits);
         buffer = bitand(buffer,2^nbits-1);
         [Decoder.temp_buffer,Decoder.bits_in_buffer] = deal(buffer,nbits);

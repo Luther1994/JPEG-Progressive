@@ -13,31 +13,26 @@ sf_v_max = max(Decoder.sample_factor(1,:));
 sf_h_max = max(Decoder.sample_factor(2,:));
 for c = 1:ImgInfo.Channels
     DQTable = Decoder.dqt_ids{Decoder.quanti_tbl_idx(c)};
-    blks = Decoder.blks_in_MCU(c);
     sf_v = Decoder.sample_factor(1,c);
     sf_h = Decoder.sample_factor(2,c);
     COE = Decoder.Coes{c};
-    for row = 0:Decoder.MCUs_per_col-1
-        for col = 0:Decoder.MCUs_per_row-1
-            mcu_cnt = row*Decoder.MCUs_per_row+col;        
-            MCU = COE(:,mcu_cnt*blks+1:(mcu_cnt+1)*blks);
-            re = [];
-            for i = 0:sf_v-1
-                for j = 0:sf_h-1
-                    blk_cnt = i*Decoder.sample_factor(1,c)+j;
-                    block = MCU(:,blk_cnt+1);
-                    temp = inverse_zigzag(block);
-                    temp = idct2(temp .* DQTable)+ 2 ^ (ImgInfo.Precision - 1);
-                    re(i*8+1:(i+1)*8,j*8+1:(j+1)*8) = temp;
-                end
-            end
-            mcu = UPSAMPLE(re,[sf_h_max/sf_h,sf_v_max/sf_v]);
-            result(row*8*sf_v_max+1:(row+1)*8*sf_v_max,...
-                col*8*sf_h_max+1:(col+1)*8*sf_h_max,c)=mcu;
+    height = Decoder.blks_per_col(c)*8;
+    width = Decoder.blks_per_row(c)*8;
+    re = zeros(height,width);
+    id = 1;
+    for row = 0:Decoder.blks_per_col(c)-1
+        for col = 0:Decoder.blks_per_row(c)-1
+            block = COE(:,id);
+            id = id+1;
+            temp = inverse_zigzag(block);
+            temp = idct2(temp .* DQTable)+ 2 ^ (ImgInfo.Precision - 1);
+            re(row*8+1:(row+1)*8,col*8+1:(col+1)*8) = temp;
         end
     end
+    temp = UPSAMPLE(re,[sf_h_max/sf_h,sf_v_max/sf_v]);
+    result(:,:,c) = temp(1:ImgInfo.Height,1:ImgInfo.Width);
 end
-if ndims(result)==3 
+if ndims(result)==3
     result = yuv2rgb(result);
 end
 imshow(result);

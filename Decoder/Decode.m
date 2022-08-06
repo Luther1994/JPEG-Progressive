@@ -491,6 +491,7 @@ end
         % 初始化
         ResetDecoder();
         data_length = ReadTwoBytes();
+<<<<<<< HEAD
         channels = ReadOneByte();
         Decoder.channel_info.channels = channels;
         data_length = data_length - 3;
@@ -528,11 +529,25 @@ end
             Decoder.channel_info.MCUs_per_row = Decoder.MCUs_per_row;
             Decoder.channel_info.MCUs_per_col = Decoder.MCUs_per_col;
             Decoder.channel_info.blks_in_MCU = sum(Decoder.blks_in_MCU);
+=======
+        [Decoder.ACTbls,Decoder.DCTbls] = deal([]);
+        Channels = ReadOneByte();
+        data_length = data_length - 3;
+        % 指定熵编码的编码表
+        for i = 1:Channels
+            ChannelIdx = ReadOneByte();
+            identifier = ReadOneByte();
+            Decoder.DCTbls(ChannelIdx) = bitshift(identifier,-4);
+            Decoder.ACTbls(ChannelIdx) = bitand(identifier,15);
+            Decoder.Channels = [Decoder.Channels ChannelIdx];
+            data_length = data_length-2;
+>>>>>>> cf05b462528378a2c4c5dcadfdaca0adb1bbff2a
         end
 
         % 指定累进编码的初始频带和终止频带
         Decoder.Ss = ReadOneByte();
         Decoder.Se = ReadOneByte();
+<<<<<<< HEAD
 
         % 指定逐次逼近的最高位和最低位
         Decoder.Al = ReadFourBits();
@@ -555,6 +570,9 @@ end
         end
 
         % debug观察用，release版本删除
+=======
+        
+>>>>>>> cf05b462528378a2c4c5dcadfdaca0adb1bbff2a
         if Decoder.Se == 0
             Band = '的DC系数';
         else
@@ -572,8 +590,16 @@ end
                     STR = '色度通道2';
             end
         end
+<<<<<<< HEAD
         assert(data_length==0,"Bad Data Length of SOS.")
         Decoder.next_marker = 0;
+=======
+        % 指定逐次逼近的最高位和最低位
+        Decoder.Al = ReadFourBits();
+        Decoder.Ah = ReadFourBits();
+        data_length = data_length - 1;
+        assert(data_length == 0,'Bad Data Length of SOS.')
+>>>>>>> cf05b462528378a2c4c5dcadfdaca0adb1bbff2a
         fprintf('第%d次SOS.解码%s\n',Decoder.SOScnt,strcat(STR,Band))
     end
     function [VALUE] = RECEIVE(SSSS)

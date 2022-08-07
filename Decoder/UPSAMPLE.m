@@ -1,13 +1,4 @@
 function [block]=UPSAMPLE(DU,factors)
-% 	"""
-%
-% 	Args:
-% 		DU:
-% 		factors:
-%
-% 	Returns:
-%
-% 	"""
 if isinteger(factors)
     factors = [factors,factors];
 end

@@ -149,6 +149,7 @@ end
             row =  MCU_height * fix(id/Width);
             col = MCU_width * mod(id,Width);
             Htable = Decoder.dc_huff_tbl(Decoder.channel_info.dc_tbl_id(c)+1);
+
             for j = 1:MCU_height
                 for k = 1:MCU_width
                     %{ 
@@ -203,7 +204,7 @@ end
                         else
                             K = K + R;
                             Temp = get_bits(S);
-                            Decoder.Coes{c}(K,blk_cnt) = bitor(EXTEND(Temp, S),P);
+                            Decoder.Coes{c}(K,blk_cnt) = bitor(EXTEND(Temp, S),P,'int16');
                             K = K + 1;
                         end
                     end
@@ -353,11 +354,13 @@ end
         buffer = Decoder.temp_buffer;
         bits_left = Decoder.bits_in_buffer;  % num of nused bits left in buffer 
         look = bitand(bitshift(buffer,-(bits_left-HUFF_LOOKAHEAD)),255);
+
         % Read one byte as the index of looktable,the high position of thre
         % result is the number of bits used to encode value,the 8 low
         % position is the encoding value.DIFF for DC coefficient and RS for
         % AC coefficient.
-        nb = bitshift(Htable.lookup(look+1),-HUFF_LOOKAHEAD);
+        temp = Htable.lookup(look+1);
+        nb = bitshift(temp,-HUFF_LOOKAHEAD);
         if nb <= HUFF_LOOKAHEAD
             % if number of bits less than 8,lookup table. 
             S = bitand(temp,bitshift(1,HUFF_LOOKAHEAD) - 1);

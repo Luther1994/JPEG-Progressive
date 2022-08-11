@@ -29,6 +29,7 @@ if mod(Height,BLOCKSIZE) || mod(Width,BLOCKSIZE)
     src = padarray(src,[addition_rows,addition_cols],'symmetric','post');
 end
 
+
 % 标准参考量化表
 qtbl ={
     [[16, 11, 10, 16, 24, 40, 51, 61]
@@ -54,7 +55,6 @@ SF = [2 1 1;2 1 1];
 % 编码器结构体
 Encoder = struct(...
     'dqt_precision',[pre1,pre2],...
-    'QtblIdx',[0,1,1],...
     'sample_factor',SF,...
     'Ss',0,...
     'Se',0,...
@@ -70,6 +70,10 @@ Encoder = struct(...
 
 Encoder.quanti_tbl{1} = LQ;
 Encoder.quanti_tbl{2} = CQ;
+SFw_max = max(Encoder.sample_factor(1,:));
+SFh_max = max(Encoder.sample_factor(2,:));
+Encoder.MCUs_in_row = ceil(Width/SFw_max/BLOCKSIZE);
+Encoder.MCUs_in_col = ceil(Height/SFh_max/BLOCKSIZE);
 
 % Image infomation
 ImgInfo = struct(...
@@ -138,56 +142,54 @@ Markers = struct( ...
     'TEM',655281,... & For temporary private use in arithmetic coding
     'RES',655282:655471);% Reserved 
 
-component_info = struct(...
+c = struct(...
     'component_id',0,...             % identifier for this component (0..255)
-    'component_index',0,...          % its index in SOF or cinfo->comp_info[]
     'w_samp_factor',0,...            % sampling factor in width (1..4)
     'h_samp_factor',0,...            % sampling factor in height (1..4)
-    'quant_tbl_no',0,...             % quantization table selector (0..3)
+    'qtbl_index',0,...             % quantization table selector (0..3)
     'dc_tbl_no',0,...                % DC entropy table selector (0..3)
     'ac_tbl_no',0,...                % AC entropy table selector (0..3)
-    'width_in_blocks',0,...          % num of blocks for current component,horizontally
-    'height_in_blocks',0,...         % num of blocks for current component,vertically
+    'blocks_per_row',0,...           % num of blocks for current component,horizontally
+    'blocks_per_col',0,...           % num of blocks for current component,vertically
     'downsampled_width',0,...        % actual component width in samples
     'downsampled_height',0,...       % actual component height in samples
     'MCU_width',0,...                % number of blocks per MCU, horizontally
     'MCU_height',0,...               % number of blocks per MCU, vertically
     'MCU_blocks',0,...               % MCU_width * MCU_height
-    'MCU_sample_width',0,...         % MCU width in samples, MCU_width*DCT_[h_]scaled_size
-    'last_col_width',0,...           % non-dummy blocks across in last MCU
-    'last_row_height',0);            % non-dummy blocks down in last MCU
-SFw_max = max(Encoder.sample_factor(1,:));
-SFh_max = max(Encoder.sample_factor(2,:));
-for c = 1:ImgInfo.components
-    component_info.component_id = c;
-    sfw = Encoder.sample_factor(1,c);
-    sfh = Encoder.sample_factor(2,c);
-    component_info.w_samp_factor = sfw;
-    component_info.h_samp_factor = sfh;
-    if c == 1
-        component_info.quant_tbl_no = 0;
-        component_info.dc_tbl_no = 0;
-        component_info.ac_tbl_no = 0;
-    else
-        component_info.quant_tbl_no = 1;
-        component_info.ac_tbl_no = 1;
-        component_info.dc_tbl_no = 1;
-    end
-    
-    factors = [SFw_max/sfw,SFh_max/sfh];
-    C = DOWNSAMPLE(src(:,:,1),factors);
-    [Height,Width] = size(C);
-    Encoder.component_info(c).image = C;
-    
-end
-% Encoder.ComponentSize = [ImgInfo.Height./SFs(1,:);...
-%     ImgInfo.Width./SFs(2,:)];
-% Encoder.blocks_per_comp = uint16(Encoder.ComponentSize./BLOCKSIZE);
-% Encoder.Components = {DOWNSAMPLE(src(:,:,1),SFs(:,1)),...
-%     DOWNSAMPLE(src(:,:,2),SFs(:,2)),...
-%     DOWNSAMPLE(src(:,:,3),SFs(:,2))};
-% Encoder.DUcnts = sum(prod(Encoder.blocks_per_comp,1));
+    'last_cols',0,...                % non-dummy blocks across in last MCU
+    'last_rows',0);                  % non-dummy blocks down in last MCU
 
+for i = 1:ImgInfo.components
+    c.component_id = i;
+    sfw = Encoder.sample_factor(1,i);
+    sfh = Encoder.sample_factor(2,i);
+    c.w_samp_factor = sfw;
+    c.h_samp_factor = sfh;
+    if i == 1
+        c.qtbl_index = 0;
+        c.dc_tbl_no = 0;
+        c.ac_tbl_no = 0;
+    else
+        c.qtbl_index = 1;
+        c.ac_tbl_no = 1;
+        c.dc_tbl_no = 1;
+    end
+    factors = [SFw_max/sfw,SFh_max/sfh];
+    comp = DOWNSAMPLE(src(:,:,i),factors);
+    [Height,Width] = size(comp);
+    c.MCU_height = sfh;
+    c.MCU_width = sfw;
+    c.MCU_blocks = sfh*sfw;
+    c.blocks_per_row = Encoder.MCUs_in_row * sfw;
+    c.blocks_per_col = Encoder.MCUs_in_col * sfh;
+    c.last_cols = c.blocks_per_row*BLOCKSIZE-Width;
+    c.last_rows = c.blocks_per_col*BLOCKSIZE-Height;
+    c.downsampled_height = c.blocks_per_col * BLOCKSIZE;
+    c.downsampled_width = c.blocks_per_row * BLOCKSIZE;
+    c.component = padarray(comp,[c.last_rows,c.last_cols],'symmetric','post');
+    c.coes = zeros(DCTSIZE,c.blocks_per_row*c.blocks_per_col);
+    Encoder.component(i) = c;
+end
 WriteOneByte = @(Bits) WriteNBytes(fid,Bits,1);
 WriteTwoBytes = @(Bits) WriteNBytes(fid,Bits,2);
 WriteFourBits = @(Bits) WriteNBytes(fid,Bits,0.5);
@@ -210,10 +212,10 @@ EncodeImage(); % 开始编码
         % Determin which quanti table and precision to be write
         qtb = zigzag(Encoder.quanti_tbl{identifier+1});
         precision = Encoder.dqt_precision(identifier+1);
-        c = bitor(bitshift(precision,4),identifier);
+        i = bitor(bitshift(precision,4),identifier);
         datalength = length(qtb) + 2 + 1;
         WriteTwoBytes(datalength);
-        WriteOneByte(c);
+        WriteOneByte(i);
 
         if precision
             WriteTwoBytes(qtb);
@@ -238,15 +240,15 @@ EncodeImage(); % 开始编码
         WriteTwoBytes(ImgInfo.Height)
         WriteTwoBytes(ImgInfo.Width)
         WriteOneByte(ImgInfo.components)
-        for c = 1: ImgInfo.components
-            WriteOneByte(c);
-            WriteFourBits(Encoder.sample_factor(1, c))
-            WriteFourBits(Encoder.sample_factor(2, c))
-            WriteOneByte(Encoder.QtblIdx(c))
+        for i = 1: ImgInfo.components
+            WriteOneByte(i);
+            WriteFourBits(Encoder.sample_factor(1, i))
+            WriteFourBits(Encoder.sample_factor(2, i))
+            WriteOneByte(Encoder.component(i).qtbl_index)
         end
     end
 
-    function  appendDHT(id,table)
+    function  WriteDHT(id,table)
         % 写入Huffman码表，以Marker‘FFC4’开头
         WriteTwoBytes(Markers.DHT)
         [BITS,VALUES] = table{:};
@@ -266,20 +268,25 @@ EncodeImage(); % 开始编码
         %}
     end
 
-    function  appendSOS(ids)
-        Components = length(ids);
+    function  WriteSOS(channels)
+        %{
+            SOS数据段规定了每次编解码处理的
+        %}
         WriteTwoBytes(Markers.SOS)
-        datalength = 6 + 2 * Components;
+        datalength = 6 + 2 * channels;
         WriteTwoBytes(datalength)
-        WriteOneByte(Components)
-        for c = 1:length(ids)
-            WriteOneByte(c)
-            WriteOneByte(ids(c))
+        WriteOneByte(channels)
+        for i = 1:channels
+            WriteOneByte(i)
+            dc_id = Encoder.component(i).dc_tbl_no;
+            ac_id = Encoder.component(i).ac_tbl_no;
+            c = bitor(bitshift(dc_id,4),ac_id);
+            WriteOneByte(c);
         end
         WriteOneByte(Encoder.Ss);
         WriteOneByte(Encoder.Se);
         WriteFourBits(Encoder.Ah);
-        WriteFourBits(Encoder.Al); % Ss = 0, Se = 63
+        WriteFourBits(Encoder.Al); 
         %{
             这一段主要指定每个通道采用的Huffman表，存储格式为：两字节数据长度、
             一字节通道数、一字节通道序号、一字节Huffman表编号、一字节存储0，表
@@ -312,26 +319,30 @@ EncodeImage(); % 开始编码
     end
     function  EncodeRestartInterval()
         ResetEncoder()
-        % 选择一种方式去存储系数，如果按照通道划分最好是用非交错模式存储
-        for chan = 1:ImgInfo.components
-            blocks_per_row = ImgInfo.Width/BLOCKSIZE/Encoder.sample_factor(1,chan);
-            blocks_in_ver = Encoder.blocks_per_comp(1,chan);
-            blocks_in_hor = Encoder.blocks_per_comp(2,chan);
-            for row = 0:blocks_in_ver-1
-                for col = 0:blocks_in_hor-1
-                    block = Encoder.Components{chan}(row * BLOCKSIZE + 1 :(row + 1) * BLOCKSIZE,...
-                        col * BLOCKSIZE + 1:(col + 1) * BLOCKSIZE);
-                    coef = round(dct2(block) ./ double(Encoder.QLUTbl));
-                    coef = zigzag(coef);
-                    Encoder.component_coes{chan}(row+1,col+1,:) = coef;
-                end
-            end
+%         % 选择一种方式去存储系数，如果按照通道划分最好是用非交错模式存储
+%         for chan = 1:ImgInfo.components
+%             comp = Encoder.component(chan);
+%             qtbl = Encoder.quanti_tbl{comp.qtbl_index};
+%             for r  = 0:comp.blocks_per_col-1
+%                 for c = 0:comp.blocks_per_row-1
+%                     block_id = r*comp.blocks_per_col + c + 1;
+%                     block = comp.component(r*BLOCKSIZE+1:(r+1)*BLOCKSIZE,...
+%                         c*BLOCKSIZE+1:(c+1)*BLOCKSIZE);
+%                     coef = round(dct2(block) ./ double(qtbl));
+%                     coef = zigzag(coef);
+%                     comp.coes(:,block_id) = coef;
+%                 end
+%             end
+%             Encoder.component(chan) = comp;
+%         end
+        coef  = load('coe.mat').COEF;
+        for i = 1:ImgInfo.components
+            Encoder.component(i).coes = coef{i};
         end
-        coef = Encoder.component_coes;
-        save("coe.mat","coef");
+%         save("coe.mat","COEF");
         EncodeDCFirst();
-%         EncodeACFirst(1);
-%         EncodeDCRefine();
+        EncodeACFirst(1);
+        EncodeDCRefine();
     end
     function EncodeDCFirst()
         Encoder.Ss = 0;
@@ -339,55 +350,76 @@ EncodeImage(); % 开始编码
         Encoder.Ah = 0;
         Encoder.Al = 1;
         ResetEncoder();
+        channels = ImgInfo.components;
         % 多个通道同时进行编解码时，需要按照交错模式存储
-        for c = 1:ImgInfo.components
-            DCcoefs = Encoder.COEFICIENTS{c}(:,:,1);
-            
-            DCcoefs = bitshift(DCcoefs(:),-Encoder.Al,'int16');
-            blocks = prod(Encoder.blocks_per_comp(:,c)); 
-            HUFFVAL = zeros(1,blocks);
-            DIFFs = zeros(1,blocks);
+        HUFFVAL = zeros(1,blocks);
+        DIFFs = zeros(1,blocks);
+        for c_id = 1:channels
+            comp = Encoder.component(c_id); 
+            DCcoefs = comp.coes;
+            DCcoefs = bitshift(DCcoefs(1,:),-Encoder.Al,'int16');
+            blocks = comp.blocks_per_col*comp.blocks_per_row;
             for bandid = 1:blocks
-                DIFF = DCcoefs(bandid) - Encoder.LastDCVal(c);
+                DIFF = DCcoefs(bandid) - Encoder.LastDCVal(c_id);
                 codelength = EnsureGategory(DIFF);  % 确定编码DIFF需要的bit数
                 HUFFVAL(bandid) = codelength;
-                Encoder.LastDCVal(c) = DCcoefs(bandid);
+                Encoder.LastDCVal(c_id) = DCcoefs(bandid);
                 DIFFs(bandid) = DIFF;
             end
-            HuffVals{c} = HUFFVAL; % 所有通道的待编码值
-            Actual_Val{c} = DIFFs;
+            if c_id == 1
+                LuTbl = Generate_HuffTable(HUFFVAL);
+            else
+
+            end
+            HuffVals{c_id} = HUFFVAL; % 所有通道的待编码值
+            Actual_Val{c_id} = DIFFs;
         end
-        LuTbl = Generate_HuffTable(HuffVals{1});
+        
         ChrTbl = Generate_HuffTable([HuffVals{2:3}]);
-        appendDHT('00',LuTbl);
-        appendDHT('01',ChrTbl);
-        tableid = [0,17,17];
-        appendSOS(tableid);
-        for c = 1:ImgInfo.components
-            if c == 1
+        WriteDHT(0,LuTbl);
+        WriteDHT(1,ChrTbl);
+        WriteSOS(ImgInfo.components);
+        for i = 1:ImgInfo.components
+            if i == 1
                 table = LuTbl;
             else
                 table = ChrTbl;
             end
-            blocks = prod(Encoder.blocks_per_comp(:,c));
+            comp = Encoder.component(i); 
+            blocks = comp.blocks_per_col*comp.blocks_per_row;
             HUFFCODE = zeros(1,blocks);
             HUFFSIZE = zeros(1,blocks);
             for bandid = 1:blocks
                 BITS = table{1};
                 HUFFVAL = table{2};
-                DIFF = Actual_Val{c}(bandid);
-                codelength = HuffVals{c}(bandid);
+                DIFF = Actual_Val{i}(bandid);
+                codelength = HuffVals{i}(bandid);
                 [code,length] = EncodeDC(DIFF,codelength,{BITS,HUFFVAL});
                 HUFFCODE(bandid) = code;
                 HUFFSIZE(bandid) = length;
             end
-            HUFFCODEs{c} = HUFFCODE;
-            HUFFSIZEs{c} = HUFFSIZE;
+            HUFFCODEs{i} = HUFFCODE;
+            HUFFSIZEs{i} = HUFFSIZE;
         end
         Re =[];
         bandid = [1,1,1];
-        for c = 1:sum(prod(Encoder.blocks_per_comp,1))
-            temp = mod(c,Encoder.MCUs_per_iMCU);
+        for ROW = 0:Encoder.MCUs_in_col-1
+            for COL = 0:Encoder.MCUs_in_row-1
+                for C = 1:ImgInfo.components
+                    comp = Encoder.component(C);
+                    htbl = Encoder.ta
+                    for row = 0:comp.MCU_height-1
+                        for col =0:comp.MCU_width-1
+                            
+                        end
+                    end
+
+                end
+            end
+
+        end
+        for i = 1:sum(prod(Encoder.blocks_per_comp,1))
+            temp = mod(i,Encoder.MCUs_per_iMCU);
             if (1 <= temp) && (temp<= 4)
                 channelid = 1;
             elseif temp == 5
@@ -423,7 +455,7 @@ EncodeImage(); % 开始编码
         %         appendDHT('11');
         coefs = string(bitand(Encoder.COEFICIENTS{:}(1,:),1*2^Encoder.Al));
         tableid = [0,0,0];
-        appendSOS(tableid);
+        WriteSOS(tableid);
         % 编码完成DC系数之后，需要按照频率从低到高逐步开始编码AC系数，每次编码选
         % 定的频带，按照不同的通道分别进行编码
         while length(coefs) >= 8
@@ -486,11 +518,11 @@ EncodeImage(); % 开始编码
         end
         Htable = Generate_HuffTable(HUFFVAL);
         if channelid == 1
-            appendDHT('10',Htable);
+            WriteDHT('10',Htable);
         else
-            appendDHT('11',Htable);
+            WriteDHT('11',Htable);
         end
-        appendSOS(1);
+        WriteSOS(1);
         [EHUFCO,EHUFSI] = SortHuffTbl(Htable);
         % 对所有的AC系数进行处理,将系数按照非交错模式重新排序一遍
         band_width = Encoder.Se-Encoder.Ss;

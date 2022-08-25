@@ -64,7 +64,7 @@ Encoder = struct(...
     'bitsleft',0,...
     'TemporaryBuffer',0,...
     'SOIFound',0, ...
-    'savefile',savefile, ... 
+    'savefile',savefile, ...
     'EOB_RL',0, ...
     'Re',char());
 
@@ -87,60 +87,60 @@ Markers = struct( ...
         Start of Frame.
         non-differential,Huffman coding
     %}
-    'SOF0',65472,...  % Baseline DCT
-    'SOF1',65473,...  % Extended sequential DCT
-    'SOF2',65474,...  % Progressive DCT
-    'SOF3',65475,...  % Lossless (sequential)
-    %{
+'SOF0',65472,...  % Baseline DCT
+'SOF1',65473,...  % Extended sequential DCT
+'SOF2',65474,...  % Progressive DCT
+'SOF3',65475,...  % Lossless (sequential)
+%{
         differential,Huffman coding
-    %}
-    'SOF5',65477,...  % Differential sequential DCT
-    'SOF6',65478,...  % Differential progressive DCT
-    'SOF7',65479,...  % Differential lossless (sequential)
-     %{
+%}
+'SOF5',65477,...  % Differential sequential DCT
+'SOF6',65478,...  % Differential progressive DCT
+'SOF7',65479,...  % Differential lossless (sequential)
+%{
         non-differential,arithmetic coding
-     %}
-    'JPG',65480,...   % Reserved for JPEG Extensions
-    'SOF9',65481,...  % Extended sequential DCT
-    'SOF10',65482,... % Progreddive DCT
-    'SOF11',65483,... % Lossless (sequential)
-    %{
+%}
+'JPG',65480,...   % Reserved for JPEG Extensions
+'SOF9',65481,...  % Extended sequential DCT
+'SOF10',65482,... % Progreddive DCT
+'SOF11',65483,... % Lossless (sequential)
+%{
         differential,arithemtic coding
-    %}
-    'SOF13',65485,... % Differential sequential DCT
-    'SOF14',65486,... % Differential Progressive DCT
-    'SOF15',65487,... % Differential lossless(sequential)
-    %{
+%}
+'SOF13',65485,... % Differential sequential DCT
+'SOF14',65486,... % Differential Progressive DCT
+'SOF15',65487,... % Differential lossless(sequential)
+%{
         Huffman table specification
-    %}
-    'DHT',65476,...   % Define Huffman table
-    %{
+%}
+'DHT',65476,...   % Define Huffman table
+%{
         Arithmetic coding conditioning specification
-    %}
-    'DAC',65484,...    % Define arithmetic coding conditioning(s)
-    %{
+%}
+'DAC',65484,...    % Define arithmetic coding conditioning(s)
+%{
         Restart interval termination
-    %}
-    'RSTm',65488:65495,...        % Restart with modulo 8 count 'm'
-    %{
+%}
+'RSTm',65488:65495,...        % Restart with modulo 8 count 'm'
+%{
         Other markers
-    %}
-    'SOI',65496,...   % Start of Marker
-    'EOI',65497,...   % End of Image
-    'SOS',65498,...   % Start of Scan
-    'DQT',65499,...   % Define Quantization Table
-    'DNL',65500,...   % Define Number of lines 
-    'DRI',65501,...   % Define restart interval
-    'DHP',65502,...   % Define hierarchical progression
-    'EXP',65503,...   % Expand reference conponent(s)
-    'APPn',65504:65519,... % Reserved for application segments
-    'JPGn',65520:65533,... % Reserved for JPEG extensions
-    'COM',65534,...   % Comment
-    %{
+%}
+'SOI',65496,...   % Start of Marker
+'EOI',65497,...   % End of Image
+'SOS',65498,...   % Start of Scan
+'DQT',65499,...   % Define Quantization Table
+'DNL',65500,...   % Define Number of lines
+'DRI',65501,...   % Define restart interval
+'DHP',65502,...   % Define hierarchical progression
+'EXP',65503,...   % Expand reference conponent(s)
+'APPn',65504:65519,... % Reserved for application segments
+'JPGn',65520:65533,... % Reserved for JPEG extensions
+'COM',65534,...   % Comment
+%{
         Reserved markers
-    %}
-    'TEM',655281,... & For temporary private use in arithmetic coding
-    'RES',655282:655471);% Reserved 
+%}
+'TEM',655281,... & For temporary private use in arithmetic coding
+'RES',655282:655471);% Reserved
 
 c = struct(...
     'component_id',0,...             % identifier for this component (0..255)
@@ -198,7 +198,7 @@ EncodeImage(); % 开始编码
     function  appendSOI()
         % write SOI marker into file
         WriteTwoBytes(Markers.SOI);
-    end 
+    end
 
     function  appendEOI()
         % write EOI marker into file
@@ -286,7 +286,7 @@ EncodeImage(); % 开始编码
         WriteOneByte(Encoder.Ss);
         WriteOneByte(Encoder.Se);
         WriteFourBits(Encoder.Ah);
-        WriteFourBits(Encoder.Al); 
+        WriteFourBits(Encoder.Al);
         %{
             这一段主要指定每个通道采用的Huffman表，存储格式为：两字节数据长度、
             一字节通道数、一字节通道序号、一字节Huffman表编号、一字节存储0，表
@@ -319,30 +319,35 @@ EncodeImage(); % 开始编码
     end
     function  EncodeRestartInterval()
         ResetEncoder()
-%         % 选择一种方式去存储系数，如果按照通道划分最好是用非交错模式存储
-%         for chan = 1:ImgInfo.components
-%             comp = Encoder.component(chan);
-%             qtbl = Encoder.quanti_tbl{comp.qtbl_index};
-%             for r  = 0:comp.blocks_per_col-1
-%                 for c = 0:comp.blocks_per_row-1
-%                     block_id = r*comp.blocks_per_col + c + 1;
-%                     block = comp.component(r*BLOCKSIZE+1:(r+1)*BLOCKSIZE,...
-%                         c*BLOCKSIZE+1:(c+1)*BLOCKSIZE);
-%                     coef = round(dct2(block) ./ double(qtbl));
-%                     coef = zigzag(coef);
-%                     comp.coes(:,block_id) = coef;
-%                 end
-%             end
-%             Encoder.component(chan) = comp;
-%         end
+        % 这里系数的生成是按照非交错模式生成的，后面多通道编码的时候记得按照
+        % 交错模式去取参数
+        %         for chan = 1:ImgInfo.components
+        %             comp = Encoder.component(chan);
+        %             qtbl = Encoder.quanti_tbl{comp.qtbl_index+1};
+        %             for r  = 0:comp.blocks_per_col-1
+        %                 for c = 0:comp.blocks_per_row-1
+        %                     block_id = r*comp.blocks_per_col + c + 1;
+        %                     block = comp.component(r*BLOCKSIZE+1:(r+1)*BLOCKSIZE,...
+        %                         c*BLOCKSIZE+1:(c+1)*BLOCKSIZE);
+        %                     coef = round(dct2(block) ./ double(qtbl));
+        %                     coef = zigzag(coef);
+        %                     comp.coes(:,block_id) = coef;
+        %                 end
+        %             end
+        %             Encoder.component(chan) = comp;
+        %         end
+        %         for i = 1:ImgInfo.components
+        %             COEF{i} = Encoder.component(i).coes;
+        %         end
+        %         save("coe.mat","COEF");
         coef  = load('coe.mat').COEF;
         for i = 1:ImgInfo.components
             Encoder.component(i).coes = coef{i};
         end
-%         save("coe.mat","COEF");
+
         EncodeDCFirst();
-        EncodeACFirst(1);
-        EncodeDCRefine();
+%         EncodeACFirst(1);
+%         EncodeDCRefine();
     end
     function EncodeDCFirst()
         Encoder.Ss = 0;
@@ -352,29 +357,24 @@ EncodeImage(); % 开始编码
         ResetEncoder();
         channels = ImgInfo.components;
         % 多个通道同时进行编解码时，需要按照交错模式存储
-        HUFFVAL = zeros(1,blocks);
-        DIFFs = zeros(1,blocks);
         for c_id = 1:channels
-            comp = Encoder.component(c_id); 
-            DCcoefs = comp.coes;
-            DCcoefs = bitshift(DCcoefs(1,:),-Encoder.Al,'int16');
+            comp = Encoder.component(c_id);
+            coefs = comp.coes;
+            coefs = bitshift(coefs(1,:),-Encoder.Al,'int16');
             blocks = comp.blocks_per_col*comp.blocks_per_row;
+            HUFFVAL = zeros(1,blocks);
+            DIFFs = zeros(1,blocks);
             for bandid = 1:blocks
-                DIFF = DCcoefs(bandid) - Encoder.LastDCVal(c_id);
+                DIFF = coefs(bandid) - Encoder.LastDCVal(c_id);
                 codelength = EnsureGategory(DIFF);  % 确定编码DIFF需要的bit数
                 HUFFVAL(bandid) = codelength;
-                Encoder.LastDCVal(c_id) = DCcoefs(bandid);
+                Encoder.LastDCVal(c_id) = coefs(bandid);
                 DIFFs(bandid) = DIFF;
-            end
-            if c_id == 1
-                LuTbl = Generate_HuffTable(HUFFVAL);
-            else
-
             end
             HuffVals{c_id} = HUFFVAL; % 所有通道的待编码值
             Actual_Val{c_id} = DIFFs;
         end
-        
+        LuTbl = Generate_HuffTable(HuffVals{1});
         ChrTbl = Generate_HuffTable([HuffVals{2:3}]);
         WriteDHT(0,LuTbl);
         WriteDHT(1,ChrTbl);
@@ -385,7 +385,7 @@ EncodeImage(); % 开始编码
             else
                 table = ChrTbl;
             end
-            comp = Encoder.component(i); 
+            comp = Encoder.component(i);
             blocks = comp.blocks_per_col*comp.blocks_per_row;
             HUFFCODE = zeros(1,blocks);
             HUFFSIZE = zeros(1,blocks);
@@ -394,50 +394,38 @@ EncodeImage(); % 开始编码
                 HUFFVAL = table{2};
                 DIFF = Actual_Val{i}(bandid);
                 codelength = HuffVals{i}(bandid);
-                [code,length] = EncodeDC(DIFF,codelength,{BITS,HUFFVAL});
+                [code,len] = EncodeDC(DIFF,codelength,{BITS,HUFFVAL});
                 HUFFCODE(bandid) = code;
-                HUFFSIZE(bandid) = length;
+                HUFFSIZE(bandid) = len;
             end
             HUFFCODEs{i} = HUFFCODE;
             HUFFSIZEs{i} = HUFFSIZE;
         end
         Re =[];
         bandid = [1,1,1];
-        for ROW = 0:Encoder.MCUs_in_col-1
-            for COL = 0:Encoder.MCUs_in_row-1
-                for C = 1:ImgInfo.components
-                    comp = Encoder.component(C);
-                    htbl = Encoder.ta
-                    for row = 0:comp.MCU_height-1
-                        for col =0:comp.MCU_width-1
-                            
+        for row = 0:Encoder.MCUs_in_col-1
+            for col = 0:Encoder.MCUs_in_row-1
+                for i = 1:ImgInfo.components
+                    comp = Encoder.component(i);
+                    for r = 0:comp.MCU_height-1
+                        for c  = 0: comp.MCU_width-1
+                            index = comp.blocks_per_row*comp.MCU_height*row...
+                                +col*comp.MCU_width+...
+                                r*comp.blocks_per_row+c+1;
+                            code = HUFFCODEs{i}(index);
+                            len = HUFFSIZEs{i}(index);
+                            Re = [Re dec2bin(code,len)];
                         end
                     end
-
                 end
-            end
-
-        end
-        for i = 1:sum(prod(Encoder.blocks_per_comp,1))
-            temp = mod(i,Encoder.MCUs_per_iMCU);
-            if (1 <= temp) && (temp<= 4)
-                channelid = 1;
-            elseif temp == 5
-                channelid = 2;
-            else
-                channelid = 3;
-            end
-            code = HUFFCODEs{channelid}(bandid(channelid));
-            length = HUFFSIZEs{channelid}(bandid(channelid));
-            Re = [Re dec2bin(code,length)];
-            bandid(channelid) = bandid(channelid) + 1;
-            while length(Re) >= 8
-                byte = bin2dec(Re(1:8));
-                WriteOneByte(byte)
-                if byte == 255
-                    WriteOneByte('00')
+                while length(Re) >= 8
+                    byte = bin2dec(Re(1:8));
+                    WriteOneByte(byte)
+                    if byte == 255
+                        WriteOneByte('00')
+                    end
+                    Re = Re(9:end);
                 end
-                Re = Re(9:end);
             end
         end
         if ~isempty(Re) % 对最后不足一个字节的Bits进行填充
@@ -531,26 +519,26 @@ EncodeImage(); % 开始编码
         blocks_in_component = prod(Encoder.blocks_per_comp(:,channelid));
         COEs = bitshift(Encoder.COEFICIENTS{channelid}(Encoder.Ss+1:Encoder.Se,:),-Encoder.Al,'int8');
         non_interleaved_coes = zeros(size(COEs));
-        row = 0; 
+        row = 0;
         rows_cnt = Encoder.sample_factor(2,channelid);
         cols_cnt = Encoder.sample_factor(1,channelid);
         if Encoder.sample_factor(2,channelid) > 1
-           while 1
-               rows = COEs(:,row*blocks_in_row+1:(row+rows_cnt)*blocks_in_row);
-               for id = 1:rows_cnt*blocks_in_row
-                   new_id =fix((id-1)/rows_cnt/cols_cnt) + mod(id-1,cols_cnt)+1;
-                   if mod(id-1,rows_cnt*cols_cnt)==0 || mod(id-1,rows_cnt*cols_cnt)==1
-                       non_interleaved_coes(:,row*blocks_in_row+new_id) = rows(:,id); 
-                   else
-                       non_interleaved_coes(:,(row+1)*blocks_in_row+new_id) = rows(:,id); 
-                   end
-               end
-               row = row + rows_cnt;
-               if row >= blocks_in_col
-                   break
-               end
-           end         
-        end     
+            while 1
+                rows = COEs(:,row*blocks_in_row+1:(row+rows_cnt)*blocks_in_row);
+                for id = 1:rows_cnt*blocks_in_row
+                    new_id =fix((id-1)/rows_cnt/cols_cnt) + mod(id-1,cols_cnt)+1;
+                    if mod(id-1,rows_cnt*cols_cnt)==0 || mod(id-1,rows_cnt*cols_cnt)==1
+                        non_interleaved_coes(:,row*blocks_in_row+new_id) = rows(:,id);
+                    else
+                        non_interleaved_coes(:,(row+1)*blocks_in_row+new_id) = rows(:,id);
+                    end
+                end
+                row = row + rows_cnt;
+                if row >= blocks_in_col
+                    break
+                end
+            end
+        end
         Re = [];
         Encoder.run_of_length = 0;
         for bandid = 1:blocks_in_component

@@ -162,7 +162,7 @@ end
                     % Huffman decode
                     DIFF = DECODE(Htable);
                     Decoder.LastDCVal(c) = Decoder.LastDCVal(c) + DIFF;
-                    Decoder.Coes{c}(1,blk_idx)= Decoder.LastDCVal(c);
+                    Decoder.Coes{c}(1,blk_idx) = Decoder.LastDCVal(c);
                 end
                 row = row + 1;
             end
@@ -175,10 +175,10 @@ end
         % End of Band run length 
         EOBRUN = Decoder.EOBRUN;
         c = Decoder.channel_info.id;
-        tbl_id = Decoder.channel_info.ac_tbl_id+1;
-        HTable = Decoder.ac_huff_tbl(tbl_id);
+        HTable = Decoder.ac_huff_tbl(Decoder.channel_info.ac_tbl_id+1);
         blks = Decoder.channel_info.blks_in_MCU;
-        P = bitshift(1,Decoder.Al);
+        
+        % if EOBRUN != 0,all left coefficient are 0 
         if EOBRUN > 0
             EOBRUN = EOBRUN - 1;
         else
@@ -191,20 +191,28 @@ end
                     K = Decoder.Ss+1;
                     while K <= Decoder.Se + 1
                         RS = DECODE(HTable,0);
-                        R = bitshift(RS,-4);          % run_length
-                        S = bitand(RS,2^4-1);         % code size
+
+                        % run_length & code size
+                        R = bitshift(RS,-4);          
+                        S = bitand(RS,2^4-1);
+
                         if S == 0
+                            % code size == 0 means several continuous 0s.
                             if R == 15
-                                K = K + 16;           % ZRL code
+                                % ZRL code
+                                K = K + 16;           
                             else
                                 % note the method calucating EOURUN
                                 EOBRUN = bitshift(1,R) + get_bits(R)-1;
                                 break                
                             end
                         else
+                            % code size !=0 means non-zero coefficient
+                            % appeared.
                             K = K + R;
-                            Temp = get_bits(S);
-                            Decoder.Coes{c}(K,blk_cnt) = bitor(EXTEND(Temp, S),P,'int16');
+                            Temp = EXTEND(get_bits(S),S);
+                            Temp = bitshift(Temp,Decoder.Al,'int16');
+                            Decoder.Coes{c}(K,blk_cnt) = Temp;
                             K = K + 1;
                         end
                     end
@@ -249,17 +257,26 @@ end
         %}
         EOBRUN = Decoder.EOBRUN;
         c = Decoder.channel_info.id;
-        tbl_id = Decoder.channel_info.ac_tbl_id+1;
-        HTable = Decoder.ac_huff_tbl(tbl_id);
+        HTable = Decoder.ac_huff_tbl(Decoder.channel_info.ac_tbl_id+1);
         blks = Decoder.channel_info.blks_in_MCU;
+
         c1 = Decoder.channel_info.MCU_width;
         c2 = Decoder.channel_info.MCU_height;
+        
         P = bitshift(1,Decoder.Al);
-        for i = 1:c1
-            for j = 1:c2
-                temp = (i-1)*c2 + j;
+        
+        for i = 0:c1-1
+            for j = 0:c2-1
+                % 当前MCU中的第几个block
+                temp = i*c2 + j + 1;   
+
+                % 全部block中的第几个block
                 blk_cnt = mcu_cnt*blks + temp;
+                
+                % 开始频带
                 K = Decoder.Ss + 1;
+
+                % 如果没有遇到end of band，则解码
                 if EOBRUN == 0
                     while K <= Decoder.Se+1
                         Temp = Decoder.Coes{c}(K,blk_cnt);

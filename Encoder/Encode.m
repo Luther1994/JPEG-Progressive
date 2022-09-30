@@ -5,7 +5,7 @@ function Encode(src,savefile,quality,method)
 if ~exist("method",'var')
     method = 2;
 end
-fid = fopen(savefile, 'wb');
+fid = fopen(savefile, 'wb');     
 BLOCKSIZE = 8;
 DCTSIZE = 64;
 if max(max(src)) > 255
@@ -146,7 +146,7 @@ c = struct(...
     'component_id',0,...             % identifier for this component (0..255)
     'w_samp_factor',0,...            % sampling factor in width (1..4)
     'h_samp_factor',0,...            % sampling factor in height (1..4)
-    'qtbl_index',0,...             % quantization table selector (0..3)
+    'qtbl_index',0,...               % quantization table selector (0..3)
     'dc_tbl_no',0,...                % DC entropy table selector (0..3)
     'ac_tbl_no',0,...                % AC entropy table selector (0..3)
     'blocks_per_row',0,...           % num of blocks for current component,horizontally
@@ -177,16 +177,26 @@ for i = 1:ImgInfo.components
     factors = [SFw_max/sfw,SFh_max/sfh];
     comp = DOWNSAMPLE(src(:,:,i),factors);
     [Height,Width] = size(comp);
+    
+    % blocks in height/width & num of blocks in one MCU
     c.MCU_height = sfh;
     c.MCU_width = sfw;
     c.MCU_blocks = sfh*sfw;
+
+    % blocks in row/col
     c.blocks_per_row = Encoder.MCUs_in_row * sfw;
     c.blocks_per_col = Encoder.MCUs_in_col * sfh;
+    
+    % remainder of cols/rows devided by BLOCKSIZE(8)
     c.last_cols = c.blocks_per_row*BLOCKSIZE-Width;
     c.last_rows = c.blocks_per_col*BLOCKSIZE-Height;
+
+    % height/width of component to encode after padding and downsampling
     c.downsampled_height = c.blocks_per_col * BLOCKSIZE;
     c.downsampled_width = c.blocks_per_row * BLOCKSIZE;
     c.component = padarray(comp,[c.last_rows,c.last_cols],'symmetric','post');
+
+    % initialized mem space to save coefficient
     c.coes = zeros(DCTSIZE,c.blocks_per_row*c.blocks_per_col);
     Encoder.component(i) = c;
 end
@@ -321,30 +331,29 @@ EncodeImage(); % 开始编码
         ResetEncoder()
         % 这里系数的生成是按照非交错模式生成的，后面多通道编码的时候记得按照
         % 交错模式去取参数
-        %         for chan = 1:ImgInfo.components
-        %             comp = Encoder.component(chan);
-        %             qtbl = Encoder.quanti_tbl{comp.qtbl_index+1};
-        %             for r  = 0:comp.blocks_per_col-1
-        %                 for c = 0:comp.blocks_per_row-1
-        %                     block_id = r*comp.blocks_per_col + c + 1;
-        %                     block = comp.component(r*BLOCKSIZE+1:(r+1)*BLOCKSIZE,...
-        %                         c*BLOCKSIZE+1:(c+1)*BLOCKSIZE);
-        %                     coef = round(dct2(block) ./ double(qtbl));
-        %                     coef = zigzag(coef);
-        %                     comp.coes(:,block_id) = coef;
-        %                 end
-        %             end
-        %             Encoder.component(chan) = comp;
-        %         end
-        %         for i = 1:ImgInfo.components
-        %             COEF{i} = Encoder.component(i).coes;
-        %         end
-        %         save("coe.mat","COEF");
+%         for chan = 1:ImgInfo.components
+%             comp = Encoder.component(chan);
+%             qtbl = Encoder.quanti_tbl{comp.qtbl_index+1};
+%             for r  = 0:comp.blocks_per_col-1
+%                 for c = 0:comp.blocks_per_row-1
+%                     block_id = r*comp.blocks_per_row + c + 1;
+%                     block = comp.component(r*BLOCKSIZE+1:(r+1)*BLOCKSIZE,...
+%                         c*BLOCKSIZE+1:(c+1)*BLOCKSIZE);
+%                     coef = round(dct2(block) ./ double(qtbl));
+%                     coef = zigzag(coef);
+%                     comp.coes(:,block_id) = coef;
+%                 end
+%             end
+%             Encoder.component(chan) = comp;
+%         end
+%         for i = 1:ImgInfo.components
+%             COEF{i} = Encoder.component(i).coes;
+%         end
+%         save("coe.mat","COEF");
         coef  = load('coe.mat').COEF;
         for i = 1:ImgInfo.components
             Encoder.component(i).coes = coef{i};
         end
-
         EncodeDCFirst();
 %         EncodeACFirst(1);
 %         EncodeDCRefine();
@@ -355,69 +364,61 @@ EncodeImage(); % 开始编码
         Encoder.Ah = 0;
         Encoder.Al = 1;
         ResetEncoder();
+        
         channels = ImgInfo.components;
-        % 多个通道同时进行编解码时，需要按照交错模式存储
+        CodeLength = cell(1,channels);     
+        DIFF = cell(1,channels);    
         for c_id = 1:channels
             comp = Encoder.component(c_id);
             coefs = comp.coes;
             coefs = bitshift(coefs(1,:),-Encoder.Al,'int16');
             blocks = comp.blocks_per_col*comp.blocks_per_row;
-            HUFFVAL = zeros(1,blocks);
-            DIFFs = zeros(1,blocks);
-            for bandid = 1:blocks
-                DIFF = coefs(bandid) - Encoder.LastDCVal(c_id);
-                codelength = EnsureGategory(DIFF);  % 确定编码DIFF需要的bit数
-                HUFFVAL(bandid) = codelength;
-                Encoder.LastDCVal(c_id) = coefs(bandid);
-                DIFFs(bandid) = DIFF;
-            end
-            HuffVals{c_id} = HUFFVAL; % 所有通道的待编码值
-            Actual_Val{c_id} = DIFFs;
-        end
-        LuTbl = Generate_HuffTable(HuffVals{1});
-        ChrTbl = Generate_HuffTable([HuffVals{2:3}]);
-        WriteDHT(0,LuTbl);
-        WriteDHT(1,ChrTbl);
-        WriteSOS(ImgInfo.components);
-        for i = 1:ImgInfo.components
-            if i == 1
-                table = LuTbl;
-            else
-                table = ChrTbl;
-            end
-            comp = Encoder.component(i);
-            blocks = comp.blocks_per_col*comp.blocks_per_row;
-            HUFFCODE = zeros(1,blocks);
-            HUFFSIZE = zeros(1,blocks);
-            for bandid = 1:blocks
-                BITS = table{1};
-                HUFFVAL = table{2};
-                DIFF = Actual_Val{i}(bandid);
-                codelength = HuffVals{i}(bandid);
-                [code,len] = EncodeDC(DIFF,codelength,{BITS,HUFFVAL});
-                HUFFCODE(bandid) = code;
-                HUFFSIZE(bandid) = len;
-            end
-            HUFFCODEs{i} = HUFFCODE;
-            HUFFSIZEs{i} = HUFFSIZE;
-        end
-        Re =[];
-        bandid = [1,1,1];
-        for row = 0:Encoder.MCUs_in_col-1
-            for col = 0:Encoder.MCUs_in_row-1
-                for i = 1:ImgInfo.components
-                    comp = Encoder.component(i);
+            huffval = zeros(1,blocks);
+            diff = zeros(1,blocks);
+            index = 1;
+            for row = 0:Encoder.MCUs_in_col-1
+                for col = 0:Encoder.MCUs_in_row-1
                     for r = 0:comp.MCU_height-1
-                        for c  = 0: comp.MCU_width-1
-                            index = comp.blocks_per_row*comp.MCU_height*row...
-                                +col*comp.MCU_width+...
-                                r*comp.blocks_per_row+c+1;
-                            code = HUFFCODEs{i}(index);
-                            len = HUFFSIZEs{i}(index);
-                            Re = [Re dec2bin(code,len)];
+                        for c = 0: comp.MCU_width-1
+%                             bandid = comp.blocks_per_row*comp.MCU_height*row...
+%                                 +col*comp.MCU_width+...
+%                                 r*comp.blocks_per_row+c+1;
+                            d = coefs(index) - Encoder.LastDCVal(c_id)
+                            % 确定编码差值需要的码字长度，也是实际的编码对象
+                            diff(index) = d;
+                            huffval(index) = EnsureGategory(d);
+                            Encoder.LastDCVal(c_id) = coefs(index);
+                            index = index + 1;
                         end
                     end
                 end
+            end
+            CodeLength{c_id} = huffval; % 所有通道的待编码值
+            DIFF{c_id} = diff;
+        end
+
+        LuTbl = Generate_HuffTable(CodeLength{1});
+        ChrTbl = Generate_HuffTable([CodeLength{2:3}]);
+        WriteDHT(0,LuTbl);
+        WriteDHT(1,ChrTbl);
+        WriteSOS(3);
+        % Interleaved mode should be adopted while encoding multicomponents 
+        % 多个通道同时进行编解码时，需要按照交错模式存储
+        
+        for chan = 1:ImgInfo.components
+            if chan == 1
+                hufftable = LuTbl;
+            else
+                hufftable = ChrTbl;
+            end
+            comp = Encoder.component(chan);
+            blocks = comp.blocks_per_col*comp.blocks_per_row;
+            Re =[];
+            for bandid = 1:blocks
+                d = DIFF{chan}(bandid);
+                codelength = CodeLength{chan}(bandid);
+                [code,len] = EncodeDC(d,codelength,hufftable);
+                Re = [Re dec2bin(code,len)];
                 while length(Re) >= 8
                     byte = bin2dec(Re(1:8));
                     WriteOneByte(byte)

@@ -168,10 +168,12 @@ end
             end
         end
     end
+
     function DecodeACFirst(mcu_cnt)
-        %{
-            First decode of AC coefficients
-        %}
+        %   =================================
+        %    First decode of AC coefficients
+        %   =================================
+
         % End of Band run length 
         EOBRUN = Decoder.EOBRUN;
         c = Decoder.channel_info.id;
@@ -186,16 +188,16 @@ end
             c2 = Decoder.channel_info.MCU_height;
             for i = 1:c1
                 for j = 1:c2
-                    temp = (i-1)*c2 + j;
-                    blk_cnt = mcu_cnt*blks + temp;
+                    blk_id = (i-1)*c2 + j;
+                    blk_cnt = mcu_cnt*blks + blk_id;
                     K = Decoder.Ss+1;
-                    while K <= Decoder.Se + 1
+                    while K <= Decoder.Se+1
                         RS = DECODE(HTable,0);
 
                         % run_length & code size
                         R = bitshift(RS,-4);          
                         S = bitand(RS,2^4-1);
-
+                        
                         if S == 0
                             % code size == 0 means several continuous 0s.
                             if R == 15
@@ -221,10 +223,11 @@ end
         end
         Decoder.EOBRUN = EOBRUN;
     end
+
     function DecodeDCRefine(id)
-        %{
-           Refine decode of  DC coefficient
-        %}
+        %   ================================
+        %   Refine decode of  DC coefficient
+        %   ================================
         Width = Decoder.channel_info.MCUs_per_row;
         P = bitshift(1,Decoder.Al);
         for i = 1:Decoder.channel_info.channels
@@ -251,10 +254,11 @@ end
             end
         end
     end
+
     function DecodeACRefine(mcu_cnt)
-        %{
-            Refine decode of AC coefficients.
-        %}
+        %   ================================
+        %   Refine decode of AC coefficients.
+        %   ================================
         EOBRUN = Decoder.EOBRUN;
         c = Decoder.channel_info.id;
         HTable = Decoder.ac_huff_tbl(Decoder.channel_info.ac_tbl_id+1);
@@ -268,10 +272,10 @@ end
         for i = 0:c1-1
             for j = 0:c2-1
                 % 当前MCU中的第几个block
-                temp = i*c2 + j + 1;   
+                blk_id = i*c2 + j + 1;   
 
                 % 全部block中的第几个block
-                blk_cnt = mcu_cnt*blks + temp;
+                blk_cnt = mcu_cnt*blks + blk_id;
                 
                 % 开始频带
                 K = Decoder.Ss + 1;
@@ -311,7 +315,7 @@ end
                                         if Temp>0
                                             Temp = bitor(Temp, P);
                                         else
-                                            Temp = bitor(temp + 2^8,P)-2^8;
+                                            Temp = bitor(blk_id + 2^8,P)-2^8;
                                         end
                                     end
                                 end
@@ -371,7 +375,7 @@ end
         buffer = Decoder.temp_buffer;
         bits_left = Decoder.bits_in_buffer;  % num of nused bits left in buffer 
         look = bitand(bitshift(buffer,-(bits_left-HUFF_LOOKAHEAD)),255);
-
+        
         % Read one byte as the index of looktable,the high position of thre
         % result is the number of bits used to encode value,the 8 low
         % position is the encoding value.DIFF for DC coefficient and RS for
@@ -539,7 +543,7 @@ end
             Decoder.channel_info.MCU_width = 1;
             Decoder.channel_info.MCU_height = 1;
             Decoder.channel_info.blks_in_MCU = 1;
-            data_length = data_length-2;
+            data_length = data_length - 2;
         else
             % interleaved save mode for multi channels in one scan
             for i = 1:channels

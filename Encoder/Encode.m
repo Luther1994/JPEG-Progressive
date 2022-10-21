@@ -51,7 +51,11 @@ qtbl ={
     [99, 99, 99, 99, 99, 99, 99, 99]]};
 [LQ,pre1] = GetQuantizer(qtbl{1},quality);
 [CQ,pre2] = GetQuantizer(qtbl{2},quality);
-SF = [2 1 1;2 1 1];
+if Components == 1
+    SF = [1;1];
+else
+    SF = [2 1 1;2 1 1];
+end
 
 % 编码器结构体
 Encoder = struct(...
@@ -71,10 +75,7 @@ Encoder = struct(...
 
 Encoder.quanti_tbl{1} = LQ;
 Encoder.quanti_tbl{2} = CQ;
-SFw_max = max(Encoder.sample_factor(1,:));
-SFh_max = max(Encoder.sample_factor(2,:));
-Encoder.MCUs_in_row = ceil(Width/SFw_max/BLOCKSIZE);
-Encoder.MCUs_in_col = ceil(Height/SFh_max/BLOCKSIZE);
+
 
 % Image infomation
 ImgInfo = struct(...
@@ -159,6 +160,11 @@ c = struct(...
     'MCU_blocks',0,...               % MCU_width * MCU_height
     'last_cols',0,...                % non-dummy blocks across in last MCU
     'last_rows',0);                  % non-dummy blocks down in last MCU
+
+SFw_max = max(Encoder.sample_factor(1,:));
+SFh_max = max(Encoder.sample_factor(2,:));
+Encoder.MCUs_in_row = ceil(Width/SFw_max/BLOCKSIZE);
+Encoder.MCUs_in_col = ceil(Height/SFh_max/BLOCKSIZE);
 
 for i = 1:ImgInfo.components
     c.component_id = i;
@@ -251,11 +257,18 @@ EncodeImage(); % 开始编码
         WriteTwoBytes(ImgInfo.Height)
         WriteTwoBytes(ImgInfo.Width)
         WriteOneByte(ImgInfo.components)
-        for channel_id = 1: ImgInfo.components
-            WriteOneByte(channel_id);
-            WriteFourBits(Encoder.sample_factor(1, channel_id))
-            WriteFourBits(Encoder.sample_factor(2, channel_id))
-            WriteOneByte(Encoder.component(channel_id).qtbl_index)
+        if ImgInfo.components == 1
+            WriteOneByte(1);
+            WriteFourBits(1);
+            WriteFourBits(1);
+            WriteOneByte(0);
+        else
+            for channel_id = 1: ImgInfo.components
+                WriteOneByte(channel_id);
+                WriteFourBits(Encoder.sample_factor(1, channel_id))
+                WriteFourBits(Encoder.sample_factor(2, channel_id))
+                WriteOneByte(Encoder.component(channel_id).qtbl_index)
+            end
         end
     end
 
@@ -356,24 +369,26 @@ EncodeImage(); % 开始编码
         for j = 1:ImgInfo.components
             Encoder.component(j).coes = coef{j};
         end
-%         EncodeDCFirst();
+        EncodeDCFirst(0);
         EncodeACFirst(1);
 %         EncodeDCRefine();
     end
-    function EncodeDCFirst()
-        Encoder.Ss = 0;
-        Encoder.Se = 0;
-        Encoder.Ah = 0;
-        Encoder.Al = 1;
+    function EncodeDCFirst(Al)
+        % ===================================
+        % DC系数的第一次编码，Al为编码最低位数
+        % ===================================
         ResetEncoder();
-        
+        Encoder.Ss = 0 ;
+        Encoder.Se = 0 ;
+        Encoder.Ah = 0 ;
+        Encoder.Al = 0 ;
         channels = ImgInfo.components;
         CodeLength = cell(1,channels);     
         DIFF = cell(1,channels);    
         for c_id = 1:channels
             comp = Encoder.component(c_id);
             coefs = comp.coes;
-            coefs = bitshift(coefs(1,:),-Encoder.Al,'int16');
+            coefs = bitshift(coefs(1,:),-Al,'int16');
             blocks = comp.blocks_per_col*comp.blocks_per_row;
             huffval = zeros(1,blocks);
             diff = zeros(1,blocks);
@@ -401,6 +416,7 @@ EncodeImage(); % 开始编码
         
         LuTbl = Generate_HuffTable(CodeLength{1});
         WriteDHT(0,LuTbl);
+
         if channels > 1
             ChrTbl = Generate_HuffTable([CodeLength{2:3}]);
             WriteDHT(1,ChrTbl);
@@ -475,38 +491,42 @@ EncodeImage(); % 开始编码
         % 得到轮廓
         % ======================================
         
-        % 当前正在编码的通道
         comp = Encoder.component(channelid);
-
+        
         % 初始频带和终止频带 & 编码的bit位，确定带宽和待编码系数
         Encoder.Ss = 1;
-        Encoder.Se = 5;
+        Encoder.Se = 63;
         Encoder.Ah = 0;
         Encoder.Al = 0;
-        band_width = Encoder.Se-Encoder.Ss;
+        band_width = Encoder.Se-Encoder.Ss+1;
         ACcoefs = Encoder.component(channelid).coes;  
-        ACcoefs = idivide(int16(ACcoefs(Encoder.Ss+1:Encoder.Se,:)),2^Encoder.Al);
-        
+        ACcoefs = idivide(int16(ACcoefs(Encoder.Ss+1:Encoder.Se+1,:)),2^Encoder.Al);
+%         fid = fopen('COE.txt','w');
+%         for i = 1:32400
+%             fprintf(fid,'%-6i',i);
+%         end  
+%         fprintf(fid,'\n\n');
+%         for i = 1:63
+%             for j = 1:32400
+%                 fprintf(fid,'%-6i',ACcoefs(i,j));
+%             end
+%             fprintf(fid,'\n');
+%         end
+%         fclose(fid);
         % 全为0的block的数量，累进编码编码AC系数与普通编码最大区别
         run_of_length = 0;
 
-        % 被编码值，对AC系数该值为游程码RS
+        % symbol to be encoded，RS for AC coefficient
         HUFFVAL = [];
         
-        % 遍历当前通道内所有block 
+        % NUM of blocks in current component 
         blocks = comp.blocks_per_col* comp.blocks_per_row;
-        for bandid =  1:blocks
-            % 当前block
-            ZZ = ACcoefs(:,bandid);
-            
-            % block内连续0计数
-            R = 0;
 
-            % 遍历带宽内所有系数
+        for bandid =  1:blocks
+            ZZ = ACcoefs(:,bandid);
+            R = 0;      % num of continuous 0 in block
             for K = 1:band_width
                 if ZZ(K)
-
-                    % 如果出现非0系数
                     if run_of_length
                         
                         % 全 0 block的个数不能超过2^14-1个（RS=15/0被占用于
@@ -523,11 +543,18 @@ EncodeImage(); % 开始编码
 
                     % 根据系数值确定编码该系数需要的码长S,组合成游程码RS存入待编码
                     S = EnsureGategory(ZZ(K));
-                    HUFFVAL(end+1) = bitshift(R,4) + S;
-
-                    % 出现非0系数后，全0系数的block计数重置为0
+                    while R >= 16
+                        RRRRSSSS = bitshift(15,4);
+                        HUFFVAL(end+1) = RRRRSSSS;
+                        R = R - 16;
+                    end
+                    RRRRSSSS = bitshift(R,4) + S;
+                    HUFFVAL(end+1) = RRRRSSSS;
+                    % 出现非0系数后，全0系数的block计数重置为0,block内连续0
+                    % 的个数归零
                     run_of_length = 0;
-                 
+                    R = 0;
+
                 % block内连续0的个数+1
                 else
                     R = R + 1;
@@ -542,7 +569,7 @@ EncodeImage(); % 开始编码
         
         % 获取Huffman码表
         Htable = Generate_HuffTable(HUFFVAL);
-        
+        fid = fopen('code.txt','w');
         if channelid == 1
             WriteDHT('10',Htable);
         else
@@ -551,29 +578,31 @@ EncodeImage(); % 开始编码
         WriteSOS(1);
         
         [EHUFCO,EHUFSI] = SortHuffTbl(Htable);
-        Re = [];
+        Re = '';
         Encoder.run_of_length = 0;
         for bandid = 1:blocks
+            code = '';
             R = 0;
             ZZ = ACcoefs(:,bandid);
             for K = 1:band_width
                 if ZZ(K)
+                    if Encoder.run_of_length
+                        code = [code Encode_run_length(EHUFCO,EHUFSI)];
+                    end
                     while R >=16
-                        code = dec2bin(EHUFCO(240),EHUFSI(240));
-                        Re =[Re code];
+                        code =[code, dec2bin(EHUFCO(241),EHUFSI(241))];
                         R = R - 16;
                     end
-                    code = Encode_run_length(EHUFCO,EHUFSI);
-                    Re =[Re code]; 
-                    code = Encode_R_ZZ(R,ZZ(K));
-                    Re =[Re code];
+                    code = [code Encode_R_ZZ(R,ZZ(K))];
                     R = 0;
                     if K == band_width
+                        Re = [Re code];
                         break;
                     end
                 else
-                    R = R+1;
+                    R = R + 1;
                     if K == band_width
+                        Re = [Re code];
                         Encoder.run_of_length = Encoder.run_of_length + 1;
                         if Encoder.run_of_length == 32767
                             code=Encode_run_length(EHUFCO,EHUFSI);
@@ -593,17 +622,9 @@ EncodeImage(); % 开始编码
                 Re = Re(9:end);
             end
         end
-        while length(Encoder.Re) >= 8
-            byte = bin2dec(Encoder.Re(1:8));
-            WriteOneByte(byte)
-            if byte == 255
-                WriteOneByte('00')
-            end
-            Encoder.Re = Encoder.Re(9:end);
-        end
-        if ~isempty(Encoder.Re) % 对最后不足一个字节的Bits进行填充
-            Encoder.Re = PrepareforMarker(Encoder.Re);
-            WriteOneByte(bin2dec(Encoder.Re))
+        if ~isempty(Re) % 对最后不足一个字节的Bits进行填充
+            Re = PrepareforMarker(Re);
+            WriteOneByte(bin2dec(Re))
         end
         function code = Encode_R_ZZ(R,Coe)
             SSSS = EnsureGategory(Coe);
@@ -617,21 +638,16 @@ EncodeImage(); % 开始编码
             code = [huffmancode dec2bin(Coe,SSSS)];
         end
         function huffmancode = Encode_run_length(EHUFCO,EHUFSI)
-            if Encoder.run_of_length == 0
-                huffmancode = '';
-                return
-            else
-                eobrun = floor(log2(Encoder.run_of_length));
-                EOBn = bitshift(eobrun,4);
-                % 计算编码run_length需要的bit数，然后转为EOBn进行编码
-                huffmancode = EHUFCO(EOBn+1);
-                huffmansize = EHUFSI(EOBn+1);
-                huffmancode = dec2bin(huffmancode,huffmansize);
-                if eobrun
-                    huffmancode = [huffmancode dec2bin(Encoder.run_of_length-bitshift(1,eobrun),eobrun)];
-                end
-                Encoder.run_of_length = 0;
+            eobrun = floor(log2(Encoder.run_of_length));
+            EOBn = bitshift(eobrun,4);
+            % 计算编码run_length需要的bit数，然后转为EOBn进行编码
+            huffmancode = EHUFCO(EOBn+1);
+            huffmansize = EHUFSI(EOBn+1);
+            huffmancode = dec2bin(huffmancode,huffmansize);
+            if eobrun
+                huffmancode = [huffmancode dec2bin(Encoder.run_of_length-bitshift(1,eobrun),eobrun)];
             end
+            Encoder.run_of_length = 0;
         end
     end
     function EncodeACRefine()

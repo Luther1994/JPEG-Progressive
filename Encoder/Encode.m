@@ -3,11 +3,13 @@ function Encode(src,savefile,quality,method)
     The main function of Encoding.
 %}
 if ~exist("method",'var')
+    % 默认的编码模式，这里是累进编码
     method = 2;
 end
-fid = fopen(savefile, 'wb');     
-BLOCKSIZE = 8;
-DCTSIZE = 64;
+fid1 = fopen(savefile, 'wb');
+
+BLOCKSIZE = 8;          %  block size of one 
+DCTSIZE = 64;           %  Num of coeficients in a block
 if max(max(src)) > 255
     precision  = 16;
 else
@@ -15,11 +17,11 @@ else
 end
 if ndims(src) == 3 && size(src,3) == 3
     src = int16(rgb2yuv(src))-2^(precision-1);
-    [Height,Width,Components] = size(src);
+    [Height,Width,C] = size(src);
 else
     src = int16(src)  - 2^(precision -1);
     [Height,Width] = size(src);
-    Components = 1;
+    C = 1;
 end
 if mod(Height,BLOCKSIZE) || mod(Width,BLOCKSIZE)
     addition_rows = Height-mod(Height,BLOCKSIZE);
@@ -51,63 +53,61 @@ qtbl ={
     [99, 99, 99, 99, 99, 99, 99, 99]]};
 [LQ,pre1] = GetQuantizer(qtbl{1},quality);
 [CQ,pre2] = GetQuantizer(qtbl{2},quality);
-if Components == 1
+if C == 1
     SF = [1;1];
 else
     SF = [2 1 1;2 1 1];
 end
 
-% 编码器结构体
-Encoder = struct(...
-    'dqt_precision',[pre1,pre2],...
-    'sample_factor',SF,...
-    'Ss',0,...
-    'Se',0,...
-    'Ah',0,...
-    'Al',0,...
-    'run_length',0,...
-    'bitsleft',0,...
-    'TemporaryBuffer',0,...
-    'SOIFound',0, ...
-    'savefile',savefile, ...
-    'EOB_RL',0, ...
-    'Re',char());
+% 编码参数，一行中的参数分别为通道编号（-1表示全通道）、Ss、Se、Ah、Al，这里按照
+% 一般累进编码的管理将一张图分为10次进行编解码，每次编码对应通道DCT系数的Ss:Se频
+% 带的Ah:Al位。
 
-Encoder.quanti_tbl{1} = LQ;
-Encoder.quanti_tbl{2} = CQ;
-
-
-% Image infomation
-ImgInfo = struct(...
-    'Precision',precision,...
-    'components',Components,...
-    'Height',Height,...
-    'Width',Width);
+Scans = {
+    -1     0     0     0     1
+    1     1     5     0     2
+    -1     0     0     1     0
+    3     1    63     0     1
+    2     1    63     0     1
+    1     6    63     0     2
+    1     1    63     2     1
+    3     1    63     1     0
+    2     1    63     1     0
+    1     1    63     1     0
+    };
 
 Markers = struct( ...
     %{
-        Start of Frame.
-        non-differential,Huffman coding
+    ============================================
+    Start of Frame.
+    non-differential,Huffman coding
+    ============================================
     %}
 'SOF0',65472,...  % Baseline DCT
 'SOF1',65473,...  % Extended sequential DCT
 'SOF2',65474,...  % Progressive DCT
 'SOF3',65475,...  % Lossless (sequential)
 %{
-        differential,Huffman coding
+    ============================================
+    differential,Huffman coding
+    ============================================
 %}
 'SOF5',65477,...  % Differential sequential DCT
 'SOF6',65478,...  % Differential progressive DCT
 'SOF7',65479,...  % Differential lossless (sequential)
 %{
-        non-differential,arithmetic coding
+    ============================================
+    non-differential,arithmetic coding
+    ============================================
 %}
 'JPG',65480,...   % Reserved for JPEG Extensions
 'SOF9',65481,...  % Extended sequential DCT
 'SOF10',65482,... % Progreddive DCT
 'SOF11',65483,... % Lossless (sequential)
 %{
-        differential,arithemtic coding
+    ============================================
+    differential,arithemtic coding
+    ============================================
 %}
 'SOF13',65485,... % Differential sequential DCT
 'SOF14',65486,... % Differential Progressive DCT
@@ -117,15 +117,21 @@ Markers = struct( ...
 %}
 'DHT',65476,...   % Define Huffman table
 %{
-        Arithmetic coding conditioning specification
+    ============================================
+    Arithmetic coding conditioning specification
+    ============================================
 %}
 'DAC',65484,...    % Define arithmetic coding conditioning(s)
 %{
-        Restart interval termination
+    ============================================
+    Restart interval termination
+    ============================================
 %}
 'RSTm',65488:65495,...        % Restart with modulo 8 count 'm'
 %{
-     Other markers
+    ============================================
+    Other markers
+    ============================================
 %}
 'SOI',65496,...   % Start of Marker
 'EOI',65497,...   % End of Image
@@ -139,12 +145,14 @@ Markers = struct( ...
 'JPGn',65520:65533,... % Reserved for JPEG extensions
 'COM',65534,...   % Comment
 %{
+    ============================================
     Reserved markers
+    ============================================
 %}
 'TEM',655281,... & For temporary private use in arithmetic coding
 'RES',655282:655471);% Reserved
 
-c = struct(...
+Comp = struct(...
     'component_id',0,...             % identifier for this component (0..255)
     'w_samp_factor',0,...            % sampling factor in width (1..4)
     'h_samp_factor',0,...            % sampling factor in height (1..4)
@@ -161,78 +169,160 @@ c = struct(...
     'last_cols',0,...                % non-dummy blocks across in last MCU
     'last_rows',0);                  % non-dummy blocks down in last MCU
 
+% 编码器结构体
+Encoder = struct(...
+    'dqt_precision',[pre1,pre2],...
+    'sample_factor',SF,...
+    'Ss',0,...
+    'Se',0,...
+    'Ah',0,...
+    'Al',0,...
+    'blocks',0,...
+    'MaxBlocks',0,...
+    'savefile',savefile, ...
+    'Buffer',[]);
+
+Encoder.quanti_tbl = [zigzag(LQ) zigzag(CQ)];
+
+% Image infomation
+ImgInfo = struct(...
+    'Precision',precision,...
+    'components',C,...
+    'Height',Height,...
+    'Width',Width);
+
 SFw_max = max(Encoder.sample_factor(1,:));
 SFh_max = max(Encoder.sample_factor(2,:));
-Encoder.MCUs_in_row = ceil(Width/SFw_max/BLOCKSIZE);
-Encoder.MCUs_in_col = ceil(Height/SFh_max/BLOCKSIZE);
-
-for i = 1:ImgInfo.components
-    c.component_id = i;
-    sfw = Encoder.sample_factor(1,i);
-    sfh = Encoder.sample_factor(2,i);
-    c.w_samp_factor = sfw;
-    c.h_samp_factor = sfh;
-    if i == 1
-        c.qtbl_index = 0;
-        c.dc_tbl_no = 0;
-        c.ac_tbl_no = 0;
+Encoder.MCUs_per_row = ceil(Width/SFw_max/BLOCKSIZE);
+Encoder.MCUs_per_col = ceil(Height/SFh_max/BLOCKSIZE);
+Encoder.MCUs = Encoder.MCUs_per_col*Encoder.MCUs_per_row;
+Encoder.blks_in_mcu = sum(prod(Encoder.sample_factor));
+for c = 1:ImgInfo.components
+    ImgInfo.com_id(c) = c;
+    Comp.component_id = c;
+    sfw = Encoder.sample_factor(1,c);
+    sfh = Encoder.sample_factor(2,c);
+    Comp.w_samp_factor = sfw;
+    Comp.h_samp_factor = sfh;
+    if c == 1
+        Comp.qtbl_index = 0;
+        Comp.dc_tbl_no = 0;
+        Comp.ac_tbl_no = 0;
     else
-        c.qtbl_index = 1;
-        c.ac_tbl_no = 1;
-        c.dc_tbl_no = 1;
+        Comp.qtbl_index = 1;
+        Comp.ac_tbl_no = 1;
+        Comp.dc_tbl_no = 1;
     end
     factors = [SFw_max/sfw,SFh_max/sfh];
-    comp = DOWNSAMPLE(src(:,:,i),factors);
+    comp = DOWNSAMPLE(src(:,:,c),factors);
     [Height,Width] = size(comp);
-    
-    % blocks in height/width & num of blocks in one MCU
-    c.MCU_height = sfh;
-    c.MCU_width = sfw;
-    c.MCU_blocks = sfh*sfw;
 
-    % blocks in row/col
-    c.blocks_per_row = Encoder.MCUs_in_row * sfw;
-    c.blocks_per_col = Encoder.MCUs_in_col * sfh;
-    
+    % blocks in height/width & num of blocks in one MCU
+    Comp.MCU_height = sfh;
+    Comp.MCU_width = sfw;
+    Comp.MCU_blocks = sfh*sfw;
+
+    % blocks in row/col and blocks in whole
+    Comp.blocks_per_row = ceil(Width/BLOCKSIZE);
+    Comp.blocks_per_col = ceil(Height/BLOCKSIZE);
+    Comp.blocks = Comp.blocks_per_col*Comp.blocks_per_row;
+
+    Encoder.blocks = Encoder.blocks + Comp.blocks;
+
     % remainder of cols/rows devided by BLOCKSIZE(8)
-    c.last_cols = c.blocks_per_row*BLOCKSIZE-Width;
-    c.last_rows = c.blocks_per_col*BLOCKSIZE-Height;
+    Comp.last_cols = Comp.blocks_per_row*BLOCKSIZE-Width;
+    Comp.last_rows = Comp.blocks_per_col*BLOCKSIZE-Height;
 
     % height/width of component to encode after padding and downsampling
-    c.downsampled_height = c.blocks_per_col * BLOCKSIZE;
-    c.downsampled_width = c.blocks_per_row * BLOCKSIZE;
-    c.component = padarray(comp,[c.last_rows,c.last_cols],'symmetric','post');
+    Comp.downsampled_height = Comp.blocks_per_col * BLOCKSIZE;
+    Comp.downsampled_width = Comp.blocks_per_row * BLOCKSIZE;
+    Comp.component = padarray(comp,[Comp.last_rows,Comp.last_cols],'symmetric','post');
 
     % initialized mem space to save coefficient
-    c.coes = zeros(DCTSIZE,c.blocks_per_row*c.blocks_per_col);
-    Encoder.component(i) = c;
+    Comp.coes = zeros(DCTSIZE,Comp.blocks_per_row*Comp.blocks_per_col);
+    Encoder.component(c) = Comp;
 end
-WriteOneByte = @(Bits) WriteNBytes(fid,Bits,1);
-WriteTwoBytes = @(Bits) WriteNBytes(fid,Bits,2);
-WriteFourBits = @(Bits) WriteNBytes(fid,Bits,0.5);
+Encoder.coefs = zeros(ImgInfo.components,DCTSIZE,Encoder.MCUs*SFh_max*SFw_max,'int16');
+% 这里保存dc系数解码时的block排列顺序，用于应对多通道编码的交错存储模式
+Encoder.dc_blk_id = ones(1,Encoder.blocks);
+GetMemeberShip()
 
-EncodeImage(); % 开始编码
-    function  appendSOI()
-        % write SOI marker into file
-        WriteTwoBytes(Markers.SOI);
+blkn = 1;
+for ROW = 0:Encoder.MCUs_per_col - 1
+    for COL = 0:Encoder.MCUs_per_row - 1
+        for ci = 1:ImgInfo.components
+            McuWidth = Encoder.sample_factor(1,ci);
+            McuHeight = Encoder.sample_factor(2,ci);
+            comp = Encoder.component(ci);
+            for r = 0:McuHeight - 1
+                for c = 0:McuWidth - 1
+                    row = ROW * McuHeight + r;
+                    col = COL * McuWidth + c;
+                    blk_id = row * comp.blocks_per_row + col + 1;
+                    Encoder.dc_blk_id(blkn) = blk_id;
+                    blkn = blkn + 1;
+                end
+            end
+        end
+    end
+end
+    function GetMemeberShip()
+        Encoder.member_ship = zeros(1,Encoder.blks_in_mcu);
+        index = 1;
+        for cc = 1:ImgInfo.components
+            mcublks = Encoder.component(cc).MCU_blocks;
+            while mcublks > 0
+                Encoder.member_ship(index) = cc;
+                index = index + 1;
+                mcublks = mcublks - 1;
+            end
+        end
+    end
+    function WriteOneByte(Bytes)
+        for i = 1:length(Bytes)
+            Byte = Bytes(i);
+            Encoder.Buffer(end+1) = Byte;
+        end
+    end
+    function WriteTwoBytes(Bytes)
+        for i = 1:length(Bytes)
+            Byte = Bytes(i);
+            MSB = bitshift(Byte,-8);
+            LSB = bitand(Byte,255);
+            WriteOneByte(MSB);
+            WriteOneByte(LSB);
+        end
+    end
+WriteSOI = @() WriteTwoBytes(Markers.SOI);
+WriteEOI = @() WriteTwoBytes(Markers.EOI);
+
+EncodeImage();
+
+    function  EncodeImage()
+        WriteSOI()
+        WriteAppn()
+        WriteDQT(0)
+        WriteDQT(1)
+        WriteSOF()
+        EncodeRestartInterval()
+        WriteEOI()
+        Close()
     end
 
-    function  appendEOI()
-        % write EOI marker into file
-        WriteTwoBytes(Markers.EOI);
-    end
+    function  WriteDQT(identifier)
 
-    function  appendDQT(identifier)
+        % ============================================
         % write DQT marker into file
+        % ============================================
         WriteTwoBytes(Markers.DQT);
 
         % Determin which quanti table and precision to be write
-        qtb = zigzag(Encoder.quanti_tbl{identifier+1});
+        qtb = Encoder.quanti_tbl(:,identifier+1);
         precision = Encoder.dqt_precision(identifier+1);
-        i = bitor(bitshift(precision,4),identifier);
+        ComponentId = bitor(bitshift(precision,4),identifier);
         datalength = length(qtb) + 2 + 1;
         WriteTwoBytes(datalength);
-        WriteOneByte(i);
+        WriteOneByte(ComponentId);
 
         if precision
             WriteTwoBytes(qtb);
@@ -241,12 +331,14 @@ EncodeImage(); % 开始编码
         end
     end
 
-    function  appendSOF()
-        %{
-           Write Start of Frame based on different encode mode.
-           This part contains the essential information of image.
-           See B.2.2 in P.35
-        %}
+    function  WriteSOF()
+
+        % ===============================================================
+        %  Write Start of Frame based on different encode mode.This part
+        %  contains the essential information of image. See B.2.2 in P.35
+        % ===============================================================
+
+        % Choose encode method(Baseline or Progressive)
         if method == 2
             SOF = Markers.SOF2;
         end
@@ -259,14 +351,15 @@ EncodeImage(); % 开始编码
         WriteOneByte(ImgInfo.components)
         if ImgInfo.components == 1
             WriteOneByte(1);
-            WriteFourBits(1);
-            WriteFourBits(1);
+            WriteOneByte(17);
             WriteOneByte(0);
         else
             for channel_id = 1: ImgInfo.components
                 WriteOneByte(channel_id);
-                WriteFourBits(Encoder.sample_factor(1, channel_id))
-                WriteFourBits(Encoder.sample_factor(2, channel_id))
+                sw = Encoder.sample_factor(1, channel_id);
+                sh = Encoder.sample_factor(2, channel_id);
+                SamFct = bitshift(sw,4)+sh;
+                WriteOneByte(SamFct);
                 WriteOneByte(Encoder.component(channel_id).qtbl_index)
             end
         end
@@ -292,25 +385,27 @@ EncodeImage(); % 开始编码
         %}
     end
 
-    function  WriteSOS(channels)
+    function  WriteSOS(comps)
         %{
-            SOS数据段规定了每次编解码处理的
+            SOS数据段规定了每次编解码的数据内容
         %}
         WriteTwoBytes(Markers.SOS)
-        datalength = 6 + 2 * channels;
+        C = length(comps);
+        datalength = 6 + 2 * C;
         WriteTwoBytes(datalength)
-        WriteOneByte(channels)
-        for i = 1:channels
-            WriteOneByte(i)
-            dc_id = Encoder.component(i).dc_tbl_no;
-            ac_id = Encoder.component(i).ac_tbl_no;
-            c = bitor(bitshift(dc_id,4),ac_id);
-            WriteOneByte(c);
+        WriteOneByte(C);
+        for i = 1:C
+            ComponentId = comps(i);
+            WriteOneByte(ComponentId)
+            dc_id = Encoder.component(ComponentId).dc_tbl_no;
+            ac_id = Encoder.component(ComponentId).ac_tbl_no;
+            huffid = bitor(bitshift(dc_id,4),ac_id);
+            WriteOneByte(huffid);
         end
         WriteOneByte(Encoder.Ss);
         WriteOneByte(Encoder.Se);
-        WriteFourBits(Encoder.Ah);
-        WriteFourBits(Encoder.Al);
+        PtTra = bitshift(Encoder.Ah,4)+Encoder.Al;
+        WriteOneByte(PtTra)
         %{
             这一段主要指定每个通道采用的Huffman表，存储格式为：两字节数据长度、
             一字节通道数、一字节通道序号、一字节Huffman表编号、一字节存储0，表
@@ -319,223 +414,183 @@ EncodeImage(); % 开始编码
         %}
     end
 
-    function  appendAPPn()
-        % 写入为应用环境保留的信息，
-        % 以Marker'FFE0-FFEF'开头
+    function  WriteAppn()
+        % ================================================
+        % 写入为应用环境保留的信息，以Marker'FFE0-FFEF'开头
+        % ================================================
         WriteTwoBytes(Markers.APPn(1))
         WriteTwoBytes(16)
         WriteOneByte([74, 70, 73, 70,  0,  1,  1,  0,  0,  1,  0,  1,  0,  0])
     end
 
-    function  ResetEncoder()
-        Encoder.LastDCVal = zeros(ImgInfo.components,1);
+    function  EncodeRestartInterval()
+        for chan = 1:ImgInfo.components
+            blkn = 1;
+            comp = Encoder.component(chan);
+            qtbl = Encoder.quanti_tbl(:,comp.qtbl_index+1);
+            for R  = 0:comp.blocks_per_col-1
+                for C = 0:comp.blocks_per_row-1
+                    block = comp.component(R*BLOCKSIZE+1:(R+1)*BLOCKSIZE,...
+                        C*BLOCKSIZE+1:(C+1)*BLOCKSIZE);
+                    coef = zigzag(dct2(block)) ./ qtbl;
+                    Encoder.coefs(chan,:,blkn) = coef;
+                    blkn = blkn + 1;
+                end
+            end
+        end
+
+%         COEF = Encoder.coefs;
+%         save("coe.mat","COEF");
+
+        Encoder.LastDCVal = zeros(ImgInfo.components,1); % DC系数差分
+
+        % 缓存的码流
+        Encoder.BufferedVal = 0;
+        Encoder.BufferedBits = 0;
+
+%         Encoder.coefs  = load('coe.mat').COEF;
+        for s = 1:size(Scans,1)
+            [Comp,Encoder.Ss,Encoder.Se,...
+                Encoder.Ah,Encoder.Al] = Scans{s,:};
+            EncodeScan(Comp);
+        end
     end
 
-    function  EncodeImage()
-        appendSOI()
-        appendAPPn()
-        appendDQT(0)
-        appendDQT(1)
-        appendSOF()
-        EncodeRestartInterval()
-        appendEOI()
-        close()
-    end
-    function  EncodeRestartInterval()
-        ResetEncoder()
-        % 这里系数的生成是按照非交错模式生成的，后面多通道编码的时候记得按照
-        % 交错模式去取参数
-%         for chan = 1:ImgInfo.components
-%             comp = Encoder.component(chan);
-%             qtbl = Encoder.quanti_tbl{comp.qtbl_index+1};
-%             for R  = 0:comp.blocks_per_col-1
-%                 for C = 0:comp.blocks_per_row-1
-%                     block_id = R*comp.blocks_per_row + C + 1;
-%                     block = comp.component(R*BLOCKSIZE+1:(R+1)*BLOCKSIZE,...
-%                         C*BLOCKSIZE+1:(C+1)*BLOCKSIZE);
-%                     coef = round(dct2(block) ./ double(qtbl));
-%                     coef = zigzag(coef);
-%                     comp.coes(:,block_id) = coef;
-%                 end
-%             end
-%             Encoder.component(chan) = comp;
-%         end
-%         COEF = cell(3,1);
-%         for cc = 1:ImgInfo.components
-%             COEF{cc} = Encoder.component(cc).coes;
-%         end
-%         save("coe.mat","COEF");
-        coef  = load('coe.mat').COEF;
-        for j = 1:ImgInfo.components
-            Encoder.component(j).coes = coef{j};
+    function EncodeScan(ComponentId)
+        % 每次扫描————即一次SOS，编码指定通道、指定频带、指定精度的系数
+        if Encoder.Ss == 0
+            if Encoder.Ah == 0
+                EncodeDCFirst();
+            else
+                EncodeDCRefine();
+            end
+        else
+            if Encoder.Ah == 0
+                EncodeACFirst(ComponentId);
+            else
+                EncodeACRefine(ComponentId);
+            end
         end
-        EncodeDCFirst(0);
-        EncodeACFirst(1);
-%         EncodeDCRefine();
     end
-    function EncodeDCFirst(Al)
+
+    function EncodeDCFirst()
         % ===================================
         % DC系数的第一次编码，Al为编码最低位数
         % ===================================
-        ResetEncoder();
-        Encoder.Ss = 0 ;
-        Encoder.Se = 0 ;
-        Encoder.Ah = 0 ;
-        Encoder.Al = 0 ;
-        channels = ImgInfo.components;
-        CodeLength = cell(1,channels);     
-        DIFF = cell(1,channels);    
-        for c_id = 1:channels
-            comp = Encoder.component(c_id);
-            coefs = comp.coes;
-            coefs = bitshift(coefs(1,:),-Al,'int16');
-            blocks = comp.blocks_per_col*comp.blocks_per_row;
-            huffval = zeros(1,blocks);
-            diff = zeros(1,blocks);
-            index = 1;
-            for row = 0:Encoder.MCUs_in_col-1
-                for col = 0:Encoder.MCUs_in_row-1
-                    for r = 0:comp.MCU_height-1
-                        for c = 0: comp.MCU_width-1
-%                             bandid = comp.blocks_per_row*comp.MCU_height*row...
-%                                 +col*comp.MCU_width+...
-%                                 r*comp.blocks_per_row+c+1;
-                            d = coefs(index) - Encoder.LastDCVal(c_id);
-                            % 确定编码差值需要的码字长度，也是实际的编码对象
-                            diff(index) = d;
-                            huffval(index) = EnsureGategory(d);
-                            Encoder.LastDCVal(c_id) = coefs(index);
-                            index = index + 1;
-                        end
-                    end
-                end
+        C = ImgInfo.components;
+
+        % DC系数编码，编码的是存储对应系数需要的二进制码字的长度
+        CodeLength = zeros(C,Encoder.MaxBlocks);
+
+        % DC系数编码当前block系数和前一个block系数的差
+        DIFF = ones(C,Encoder.MaxBlocks);
+        coefs = bitshift(Encoder.coefs,-Encoder.Al,'int16');
+        blk_id = zeros(1,C);
+        for mcu_cnt = 0:Encoder.MCUs-1
+            for blkn = 1:Encoder.blks_in_mcu
+                ci = Encoder.member_ship(blkn);
+                blk_cnt = Encoder.dc_blk_id(sum(blk_id)+1);
+                blk_id(ci) = blk_id(ci) + 1;
+                % 计算DC系数差值
+                DcDiff = coefs(ci,1,blk_cnt) - Encoder.LastDCVal(ci);
+
+                % 确定码字长度
+                DIFF(ci,blk_id(ci)) = DcDiff;
+                CodeLength(ci,blk_id(ci)) = EnsureGategory(DcDiff);
+                Encoder.LastDCVal(ci) = coefs(ci,1,blk_cnt);
+                
             end
-            CodeLength{c_id} = huffval; % 所有通道的待编码值
-            DIFF{c_id} = diff;
         end
         
-        LuTbl = Generate_HuffTable(CodeLength{1});
+        % 写入DC亮度表，如果是编码RGB图的话再写入AC亮度表
+        LuTbl = Generate_HuffTable(CodeLength(1,:));
         WriteDHT(0,LuTbl);
-
-        if channels > 1
-            ChrTbl = Generate_HuffTable([CodeLength{2:3}]);
+        if C > 1
+            codes = [CodeLength(2,1:Encoder.component(2).blocks)...
+                CodeLength(3,1:Encoder.component(3).blocks)];
+            ChrTbl = Generate_HuffTable(codes);
             WriteDHT(1,ChrTbl);
         end
-        WriteSOS(ImgInfo.components);
-        % Interleaved mode should be adopted while encoding multicomponents 
-        % 多个通道同时进行编解码时，需要按照交错模式存储
-        
-        for chan = 1:ImgInfo.components
-            if chan == 1
-                hufftable = LuTbl;
-            else
-                hufftable = ChrTbl;
-            end
-            comp = Encoder.component(chan);
-            blocks = comp.blocks_per_col*comp.blocks_per_row;
-            Re =[];
-            for bandid = 1:blocks
-                d = DIFF{chan}(bandid);
-                codelength = CodeLength{chan}(bandid);
-                [code,len] = EncodeDC(d,codelength,hufftable);
-                Re = [Re dec2bin(code,len)];
-                while length(Re) >= 8
-                    byte = bin2dec(Re(1:8));
-                    WriteOneByte(byte)
-                    if byte == 255
-                        WriteOneByte('00')
-                    end
-                    Re = Re(9:end);
+
+        % 写入SOS扫描头，包含当前被编码的通道的信息
+        WriteSOS(1:ImgInfo.components);
+        blk_id = ones(1,C);
+        for mcu_cnt = 0:Encoder.MCUs-1
+            for blkn = 1:Encoder.blks_in_mcu
+                ci = Encoder.member_ship(blkn);
+                if ci == 1
+                    hufftable = LuTbl;
+                else
+                    hufftable = ChrTbl;
                 end
+                DcDiff = DIFF(ci,blk_id(ci));
+                codelength= CodeLength(ci,blk_id(ci));
+                [code,len] = EncodeDC(DcDiff,codelength,hufftable);
+                UpdateBuffer(code,len);
+                WriteCodeStream();
+                blk_id(ci) = blk_id(ci) + 1;
             end
         end
-        if ~isempty(Re) % 对最后不足一个字节的Bits进行填充
-            Re = PrepareforMarker(Re);
-            WriteOneByte(bin2dec(Re))
-        end
+        FillByte();
     end
 
     function EncodeDCRefine()
-        ResetEncoder();
-        Encoder.Ss = 0;
-        Encoder.Se = 0;
-        Encoder.Ah = 1;
-        Encoder.Al = 0;
-        %         appendDHT('11');
-        coefs = string(bitand(Encoder.COEFICIENTS{:}(1,:),1*2^Encoder.Al));
-        tableid = [0,0,0];
-        WriteSOS(tableid);
-        % 编码完成DC系数之后，需要按照频率从低到高逐步开始编码AC系数，每次编码选
-        % 定的频带，按照不同的通道分别进行编码
-        while length(coefs) >= 8
-            byte = bin2dec(join(coefs(1:8)));
-            WriteOneByte(byte)
-            %{
-               每次存进去一个字节，遇到‘FF’需要在后面添加 '00'，防止
-               和Marker冲突
-            %}
-            if byte == 255
-                WriteOneByte('00')
+        % =======================================
+        % DC系数的精度逼近
+        % =======================================
+        C = ImgInfo.components;
+        WriteSOS(1:ImgInfo.components);
+        LSB = squeeze(bitand(Encoder.coefs(:,1,:),2^Encoder.Al,'int16'));
+        for mcu_cnt = 0:Encoder.MCUs-1
+            for blkn = 1:Encoder.blks_in_mcu
+                ci = Encoder.member_ship(blkn);
+                blk_cnt = Encoder.dc_blk_id(mcu_cnt*Encoder.blks_in_mcu+blkn);
+                Encoder.BufferedVal = ...
+                    bitshift(Encoder.BufferedVal,1);
+                Encoder.BufferedBits = Encoder.BufferedBits + 1;
+                if LSB(ci,blk_cnt)
+                    Encoder.BufferedVal = Encoder.BufferedVal + 1;
+                end
             end
-            coefs = coefs(9:end);
+            WriteCodeStream();
         end
-        if ~isempty(coefs)    % 对最后不足一个字节的Bits进行填充
-            coefs = PrepareforMarker(coefs);
-            WriteOneByte(bin2dec(coefs))
-        end
+        FillByte();
     end
 
-    function EncodeACFirst(channelid)
-        % ======================================
-        % AC系数的第一次编码，编码AC系数的高位，
-        % 得到轮廓
-        % ======================================
-        
-        comp = Encoder.component(channelid);
-        
+
+    function EncodeACFirst(ComponentId)
+        % ==========================================
+        % AC系数的第一次编码，编码AC系数的高位，得到轮廓
+        % ==========================================
+        comp = Encoder.component(ComponentId);
+
         % 初始频带和终止频带 & 编码的bit位，确定带宽和待编码系数
-        Encoder.Ss = 1;
-        Encoder.Se = 63;
-        Encoder.Ah = 0;
-        Encoder.Al = 0;
         band_width = Encoder.Se-Encoder.Ss+1;
-        ACcoefs = Encoder.component(channelid).coes;  
-        ACcoefs = idivide(int16(ACcoefs(Encoder.Ss+1:Encoder.Se+1,:)),2^Encoder.Al);
-%         fid = fopen('COE.txt','w');
-%         for i = 1:32400
-%             fprintf(fid,'%-6i',i);
-%         end  
-%         fprintf(fid,'\n\n');
-%         for i = 1:63
-%             for j = 1:32400
-%                 fprintf(fid,'%-6i',ACcoefs(i,j));
-%             end
-%             fprintf(fid,'\n');
-%         end
-%         fclose(fid);
+        ACcoefs = squeeze(Encoder.coefs(ComponentId,Encoder.Ss+1:Encoder.Se+1,:));
+        ACcoefs = idivide(ACcoefs,2^Encoder.Al);
+
         % 全为0的block的数量，累进编码编码AC系数与普通编码最大区别
         run_of_length = 0;
 
         % symbol to be encoded，RS for AC coefficient
         HUFFVAL = [];
-        
-        % NUM of blocks in current component 
-        blocks = comp.blocks_per_col* comp.blocks_per_row;
 
-        for bandid =  1:blocks
-            ZZ = ACcoefs(:,bandid);
+        % NUM of blocks in current component
+
+        for blk_id =  1:comp.blocks
+            ZZ = ACcoefs(:,blk_id);
             R = 0;      % num of continuous 0 in block
             for K = 1:band_width
                 if ZZ(K)
                     if run_of_length
-                        
+
                         % 全 0 block的个数不能超过2^14-1个（RS=15/0被占用于
                         % 表示ZRL码），如果超过，则先用一个RS=14/0表示32767
                         if run_of_length > 32767
                             HUFFVAL(end+1) = bitshift(14,4);
                             run_of_length = run_of_length-32767;
                         end
-                        
+
                         % 取2对数并向下取整，得到编码run_of_length需要的bit数
                         EOBRUN = bitshift(floor(log2(run_of_length)),4);
                         HUFFVAL(end+1) = EOBRUN;
@@ -555,7 +610,7 @@ EncodeImage(); % 开始编码
                     run_of_length = 0;
                     R = 0;
 
-                % block内连续0的个数+1
+                    % block内连续0的个数+1
                 else
                     R = R + 1;
                 end
@@ -564,93 +619,325 @@ EncodeImage(); % 开始编码
                 % run_of_length == 1，解码时会直接跳过当前block，即当前block
                 % 后面的系数全为0
                 run_of_length = run_of_length + 1;
-            end                                                                                              
+            end
+            if blk_id == comp.blocks
+                if run_of_length
+                    HUFFVAL(end+1) = bitshift(floor(log2(run_of_length)),4);
+                end
+            end
         end
-        
-        % 获取Huffman码表
         Htable = Generate_HuffTable(HUFFVAL);
-        fid = fopen('code.txt','w');
-        if channelid == 1
-            WriteDHT('10',Htable);
+        if ComponentId == 1
+            WriteDHT(16,Htable);
         else
-            WriteDHT('11',Htable);
+            WriteDHT(17,Htable);
         end
-        WriteSOS(1);
-        
+        WriteSOS(ComponentId);
         [EHUFCO,EHUFSI] = SortHuffTbl(Htable);
-        Re = '';
         Encoder.run_of_length = 0;
-        for bandid = 1:blocks
-            code = '';
+        for blk_id = 1:comp.blocks
             R = 0;
-            ZZ = ACcoefs(:,bandid);
+            ZZ = ACcoefs(:,blk_id);
             for K = 1:band_width
                 if ZZ(K)
                     if Encoder.run_of_length
-                        code = [code Encode_run_length(EHUFCO,EHUFSI)];
+                        [Code,Size] = Encode_run_length(EHUFCO,EHUFSI);
+                        UpdateBuffer(Code,Size);
+                        Encoder.run_of_length = 0;
                     end
                     while R >=16
-                        code =[code, dec2bin(EHUFCO(241),EHUFSI(241))];
+                        UpdateBuffer(EHUFCO(241),EHUFSI(241));
                         R = R - 16;
                     end
-                    code = [code Encode_R_ZZ(R,ZZ(K))];
+                    S = EnsureGategory(ZZ(K));
+                    RS = bitshift(R,4) + S;
+                    UpdateBuffer(EHUFCO(RS+1),EHUFSI(RS+1));
+                    if ZZ(K) < 0
+                        ZZ(K) = ZZ(K) +  2 ^ S - 1;
+                    end
+                    UpdateBuffer(ZZ(K),S);
                     R = 0;
                     if K == band_width
-                        Re = [Re code];
                         break;
                     end
                 else
                     R = R + 1;
                     if K == band_width
-                        Re = [Re code];
                         Encoder.run_of_length = Encoder.run_of_length + 1;
                         if Encoder.run_of_length == 32767
-                            code=Encode_run_length(EHUFCO,EHUFSI);
-                            Re =[Re code];
-                            Encoder.run_of_length = Encoder.run_of_length-32767;
+                            [Code,Size] = Encode_run_length(EHUFCO,EHUFSI);
+                            UpdateBuffer(Code,Size);
+                            Encoder.run_of_length = Encoder.run_of_length - 32767;
                             break;
                         end
                     end
                 end
             end
-            while length(Re) >= 8
-                byte = bin2dec(Re(1:8));
-                WriteOneByte(byte)
-                if byte == 255
-                    WriteOneByte('00')
+            if blk_id == comp.blocks
+                if Encoder.run_of_length
+                    [Code,Size]=Encode_run_length(EHUFCO,EHUFSI);
+                    UpdateBuffer(Code,Size);
                 end
-                Re = Re(9:end);
             end
         end
-        if ~isempty(Re) % 对最后不足一个字节的Bits进行填充
-            Re = PrepareforMarker(Re);
-            WriteOneByte(bin2dec(Re))
-        end
-        function code = Encode_R_ZZ(R,Coe)
-            SSSS = EnsureGategory(Coe);
-            RS = bitshift(R,4) + SSSS;
-            huffmancode = EHUFCO(RS+1);
-            huffmansize = EHUFSI(RS+1);
-            huffmancode = dec2bin(huffmancode,huffmansize);
-            if Coe<0
-                Coe = Coe +  2 ^ SSSS - 1;
+        FillByte();
+    end
+
+    function EncodeACRefine(ComponentId)
+        % ==========================================
+        % AC系数的第二次编码，编码AC系数的低位，得到细节
+        % ==========================================
+        comp = Encoder.component(ComponentId);
+
+        % 初始频带和终止频带 & 编码的bit位，确定带宽和待编码系数
+        assert(Encoder.Ah - Encoder.Al == 1,'1 bit would be encoded once.')
+
+        MSB = squeeze(idivide(Encoder.coefs(ComponentId,:,:),2^Encoder.Ah));
+        LSB = idivide(squeeze(Encoder.coefs(ComponentId,:,:)) ...
+            - MSB*2^Encoder.Ah,2^Encoder.Al);
+        run_of_length = 0;
+        % symbol to be encoded，RS for AC coefficient
+        HUFFVAL = [];
+        for blk_id = 1:comp.blocks
+            ZZ = LSB(:,blk_id);
+            History = MSB(:,blk_id);
+
+            % Num of continuous 0 in block，ignore 0 with non-zero history
+            % while counting.
+            R = 0;
+
+            for K = Encoder.Ss + 1:Encoder.Se + 1
+                if History(K)==0
+                    if ZZ(K)
+                        if run_of_length
+
+                            % 全 0 block的个数不能超过2^14-1个（RS=15/0被占用于
+                            % 表示ZRL码），如果超过，则先用一个RS=14/0表示32767
+                            if run_of_length > 32767
+                                HUFFVAL(end+1) = bitshift(14,4);
+                                run_of_length = run_of_length-32767;
+                            end
+
+                            % 取2对数并向下取整，得到编码run_of_length需要的bit数
+                            EOBRUN = bitshift(floor(log2(run_of_length)),4);
+                            HUFFVAL(end+1) = EOBRUN;
+                        end
+
+                        S = EnsureGategory(ZZ(K));
+                        assert(S == 1,'Size of newly coef in refine AC must be 1.')
+
+                        while R >= 16
+                            RRRRSSSS = bitshift(15,4);
+                            HUFFVAL(end+1) = RRRRSSSS;
+                            R = R - 16;
+                        end
+                        RRRRSSSS = bitshift(R,4) + S;
+                        HUFFVAL(end+1) = RRRRSSSS;
+                        run_of_length = 0;
+                        R = 0;
+                    else
+                        R = R + 1;
+                    end
+                end
             end
-            code = [huffmancode dec2bin(Coe,SSSS)];
-        end
-        function huffmancode = Encode_run_length(EHUFCO,EHUFSI)
-            eobrun = floor(log2(Encoder.run_of_length));
-            EOBn = bitshift(eobrun,4);
-            % 计算编码run_length需要的bit数，然后转为EOBn进行编码
-            huffmancode = EHUFCO(EOBn+1);
-            huffmansize = EHUFSI(EOBn+1);
-            huffmancode = dec2bin(huffmancode,huffmansize);
-            if eobrun
-                huffmancode = [huffmancode dec2bin(Encoder.run_of_length-bitshift(1,eobrun),eobrun)];
+            if R
+                % run_of_length == 1，解码时会直接跳过当前block，即当前block
+                % 后面的系数全为0
+                run_of_length = run_of_length + 1;
             end
-            Encoder.run_of_length = 0;
+            if blk_id == comp.blocks
+                if run_of_length
+                    HUFFVAL(end+1) = bitshift(floor(log2(run_of_length)),4);
+                end
+            end
+        end
+        Htable = Generate_HuffTable(HUFFVAL);
+        if ComponentId == 1
+            WriteDHT(16,Htable);
+        else
+            WriteDHT(17,Htable);
+        end
+        WriteSOS(ComponentId);
+        [EHUFCO,EHUFSI] = SortHuffTbl(Htable);
+        Encoder.run_of_length = 0;
+
+        % =================================================================
+        % 在ACrefine的编码中，由于统计间隔的连续0的个数的时候忽略了当前位置的系数
+        % 前一精度不为0的情况，所以在得到run_of_length之后要回头统计被忽略的系数，
+        % 并用特定方法对其进行编码。SkippedCode就是用来存储这些被忽略的系数的编码
+        % 结果的。每次出现RS≠0时，都回过头处理一次，然后再初始化为0.
+        % =================================================================
+        [SkippedCode,SkippedSize] = deal(0);
+
+        for blk_id = 1:comp.blocks
+            R = 0;
+            ZZ = LSB(:,blk_id);
+            History = MSB(:,blk_id);
+            K = Encoder.Ss + 1;
+
+            % 同样由于忽略的原因，遇到RS后需要重新遍历当前block的系数，对前一
+            % 精度不为0的系数进行编码，LastK是上一次RS≠0时的系数位置索引。每
+            % 一个block，LastK都初始化为Ss+1.编码过程中History指当前位置的系
+            % 数前一精度下的值，Current表示该系数在当前精度下的值。
+            LastK = Encoder.Ss + 1;
+            while K <= Encoder.Se + 1
+                if History(K) == 0
+                    if ZZ(K) == 0
+                        % History == 0 && Current == 0
+                        R = R + 1;
+                    else
+                        % History == 0 && Current ≠ 0
+                        if Encoder.run_of_length
+                            [Code,Size] = Encode_run_length(EHUFCO,EHUFSI);
+                            UpdateBuffer(Code,Size);
+
+                            % 先编码Eobrun，再把中间略过的部分加上去，然后重置。
+                            UpdateBuffer(SkippedCode,SkippedSize);
+                            [SkippedCode,SkippedSize] = deal(0);
+                            Encoder.run_of_length = 0;
+                        end
+                        while R >= 16
+                            % R >=16 时，用RS == 15/0表示连续的16个0，
+                            % 同样需要统计16个0中被忽略的部分
+                            UpdateBuffer(EHUFCO(241),EHUFSI(241));
+                            k = LastK;
+                            i = 1;
+                            while i <= 16
+                                if History(k) ~= 0
+                                    if ZZ(k)
+                                        UpdateBuffer(1,1);
+                                    else
+                                        UpdateBuffer(0,1);
+                                    end
+                                else
+                                    i = i + 1;
+                                end
+                                k = k + 1;
+                            end
+                            R = R - 16;
+                            LastK = k;
+                        end
+                        RS = bitshift(R,4) + 1;   % S shuld always be 1.
+                        UpdateBuffer(EHUFCO(RS+1),EHUFSI(RS+1));
+                        % 根据当前系数符号写入对应二进制码字
+                        if ZZ(K) > 0
+                            UpdateBuffer(1,1);
+                        else
+                            UpdateBuffer(0,1);
+                        end
+                        for k = LastK:K
+                            if History(k) ~= 0
+                                if ZZ(k)
+                                    UpdateBuffer(1,1);
+                                else
+                                    UpdateBuffer(0,1);
+                                end
+                            else
+                                if R == 0
+                                    break
+                                end
+                                R = R - 1;
+                            end
+                        end
+                        LastK = K + 1;
+                    end
+                end
+                K = K + 1;
+            end
+            % 对跳过的部分编码
+            for k = LastK:Encoder.Se + 1
+                if MSB(k,blk_id)
+                    SkippedCode = bitshift(SkippedCode,1);
+                    SkippedSize = SkippedSize + 1;
+                    if LSB(k,blk_id)
+                        % With correction
+                        SkippedCode = SkippedCode +1;
+                    end
+                end
+            end
+            if R
+                Encoder.run_of_length = Encoder.run_of_length + 1;
+                if Encoder.run_of_length == 32767
+                    [Code,Size] = Encode_run_length(EHUFCO,EHUFSI);
+                    UpdateBuffer(Code,Size);
+                    Encoder.run_of_length = Encoder.run_of_length - 32767;
+                    break;
+                end
+            end
+        end
+        % 如果最后几列全为0，也要编码之后写入文件中。
+        if Encoder.run_of_length
+            [Code,Size] = Encode_run_length(EHUFCO,EHUFSI);
+            UpdateBuffer(Code,Size);
+        end
+        FillByte();
+    end
+
+    function UpdateBuffer(code,size)
+        % 这一步是为了避免编码出来的码字过大，导致数据溢出
+        while size > 8
+            MSB = bitshift(code,8-size);
+            Encoder.BufferedVal = bitshift(Encoder.BufferedVal,8)+MSB;
+            Encoder.BufferedBits = Encoder.BufferedBits+8;
+            WriteCodeStream();
+            size = size-8;
+            code = bitand(code,bitshift(1,size)-1);
+        end
+        Encoder.BufferedVal = bitshift(Encoder.BufferedVal,size)+code;
+        Encoder.BufferedBits = Encoder.BufferedBits + size;
+        WriteCodeStream();
+    end
+
+    function WriteCodeStream()
+        % ==================
+        % 将编码结果写入文件中
+        % ==================
+
+        while Encoder.BufferedBits >= 8
+            CC = bitshift(Encoder.BufferedVal, ...
+                8-Encoder.BufferedBits);
+            WriteOneByte(CC);
+            if CC == 255
+                WriteOneByte(0);
+            end
+            Encoder.BufferedVal = bitand(Encoder.BufferedVal, ...
+                bitshift(1,Encoder.BufferedBits-8)-1);
+            Encoder.BufferedBits = Encoder.BufferedBits - 8;
         end
     end
-    function EncodeACRefine()
-        
+
+    function FillByte()
+        %  =============================
+        %  对最后不足一个字节的Bits进行填充
+        %  =============================
+        if Encoder.BufferedBits
+            Encoder.BufferedVal = bitshift(Encoder.BufferedVal, ...
+                8-Encoder.BufferedBits);
+            WriteOneByte(Encoder.BufferedVal)
+            Encoder.BufferedBits = 0;
+            Encoder.BufferedVal = 0;
+        end
+    end
+
+
+    function [code,size] = Encode_run_length(EHUFCO,EHUFSI)
+        eobrun = floor(log2(Encoder.run_of_length));
+        EOBn = bitshift(eobrun,4);
+
+        % 计算编码run_length需要的bit数，然后转为EOBn进行编码
+        code = EHUFCO(EOBn+1);
+        size = EHUFSI(EOBn+1);
+
+        % Run of Length超过2^eobrun的部分，直接用码长为eobrun的二进制表示
+        Extension = Encoder.run_of_length-bitshift(1,eobrun);
+
+        if eobrun
+            code = bitshift(code,eobrun) + Extension;
+            size = size + eobrun;
+        end
+    end
+    function Close()
+        fwrite(fid1,Encoder.Buffer,"uint8");
+        fclose(fid1);
     end
 end

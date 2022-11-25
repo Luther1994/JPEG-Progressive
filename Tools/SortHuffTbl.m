@@ -4,11 +4,13 @@ function  [EHUFCO,EHUFSI] = SortHuffTbl(HuffmanTable)
     可以直接用值来索引码长、码字
 %}
 [BITS,HuffVal] = HuffmanTable{:};
+
 HUFFSIZE = decode_HUFFSIZE(BITS);
 HUFFCODE = decode_HUFFCODE(HUFFSIZE);
-% [ValueTable,HUFFSIZE, HUFFCODE] = HuffmanTable{:};
-EHUFCO = zeros(1,max(HuffVal));
-EHUFSI = zeros(1,max(HuffVal));
+
+EHUFCO = zeros(1,max(HuffVal)+1);
+EHUFSI = zeros(1,max(HuffVal)+1);
+
 for K = 1:length(HuffVal)
     value = HuffVal(K);
     EHUFCO(value+1) = HUFFCODE(K);

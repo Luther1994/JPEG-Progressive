@@ -10,7 +10,7 @@ if inverse
 else
     assert (ismatrix(src), 'Input coefficients matrix must be two dimensions!')
     [cols,rows] = size(src);
-    result = zeros(rows*cols,1);
+    result = zeros(rows*cols,1,'int16');
     result(1) = src(pos(1),pos(2));
 end
 

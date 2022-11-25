@@ -11,12 +11,13 @@ Decoder = struct( ...
     'Ah',0, ...
     'Al',0,...
     'EOBRUN',0,...
-    'bitsleft',0,...
     'SOIFound',0, ...
-    'savefile',savefile, ...
     'bits_in_buffer',0,...
     'temp_buffer',0,...
-    'next_marker',0);
+    'next_marker',0, ...
+    'JpegBuffer',fread(jpegfile), ...
+    'FilePtr',1,...
+    'savefile',savefile);
 
 % struct of Image infomation for public use
 ImgInfo = struct( ...
@@ -37,10 +38,34 @@ Markers = struct( ...
     'SOFs',[192:195,197:203,205:207],...
     'APPn',224:249);
 
-ReadOneByte = @() ReadNBytes(jpegfile,1);
-ReadTwoBytes = @() ReadNBytes(jpegfile,2);
-ReadFourBits = @() ReadNBytes(jpegfile,0.5);
 
+    function Byte = ReadOneByte()
+        Byte = Decoder.JpegBuffer(Decoder.FilePtr);
+        Decoder.FilePtr = Decoder.FilePtr + 1;
+    end
+
+    function Byte = ReadTwoBytes
+        Byte = Decoder.JpegBuffer(Decoder.FilePtr:Decoder.FilePtr + 1);
+        Byte = bitshift(Byte(1),8) + Byte(2);
+        Decoder.FilePtr = Decoder.FilePtr + 2;
+    end
+
+    function Bytes = ReadNBytes(n,precision)
+        if ~exist("precision",'var')
+            precision = 1;
+        end
+        assert(precision == 1 | precision==2,'Data precision must be 1 or 2.')
+        if precision==1
+            Bytes = Decoder.JpegBuffer(Decoder.FilePtr:Decoder.FilePtr+n-1);
+        else
+            Bytes = Decoder.JpegBuffer(Decoder.FilePtr:Decoder.FilePtr+2*n-1);
+            for i = 1:n
+                Bytes(i) = bitshift(Bytes(2*i-1),8) + Bytes(2*i);
+            end
+            Bytes = Bytes(1:n);
+        end
+        Decoder.FilePtr = Decoder.FilePtr + precision * n;
+    end
 HUFF_LOOKAHEAD = 8;
 JPEG_BLOCK_SIZE = 64;
 while 1
@@ -71,7 +96,11 @@ while 1
                 fclose(jpegfile);
                 error("Decoder.next_marker");
             end
+            try
             assert(NewByte == 255,'Next Byte Must be 0xFF')
+            catch
+                return
+            end
             Marker = ReadOneByte();
         end
         if ismember(Marker,Markers.SOFs)
@@ -95,7 +124,7 @@ while 1
                     DecodeImage();
                 case Markers.EOI
                     fprintf('EOI found,decode terminate.image saved as %s\n',savefile);
-                    GenerateImage(Decoder,ImgInfo);
+                    GenerateImage();
                     fclose(jpegfile);
                     break;
                 case Markers.COM
@@ -115,250 +144,205 @@ while 1
     end
 end
     function ResetDecoder()
-        Decoder.Channels = [];
         Decoder.LastDCVal = [0,0,0];
         Decoder.bits_in_buffer = 0;
         Decoder.temp_buffer = 0;
+        Decoder.comp_id = 1;
     end
     function DecodeImage()
         %{
             Main function of decode.
         %}
-
         ParseSOS();
-        c1 = Decoder.channel_info.MCUs_per_row;
-        c2 = Decoder.channel_info.MCUs_per_col;
-        for r = 0:c1-1
-            for c = 0:c2-1
-                mcu_id = r*c2 + c;
-                Decoder.DecodeMCU(mcu_id);
-            end
+        for i = 0:Decoder.MCUs-1
+            Decoder.DecodeMCU(i);
         end
-        % Set buffer in NextBit to be 0，
-        Decoder.bitsleft = 0;
     end
-    function DecodeDCFirst(id)
+
+    function DecodeDCFirst(mcu_cnt)
         %{
             First decode of DC coefficients
         %}
-        Width = Decoder.channel_info.MCUs_per_row;
-        for i = 1:Decoder.channel_info.channels
-            c = Decoder.channel_info.id(i); 
-            MCU_width = Decoder.sample_factor(1,c);
-            MCU_height = Decoder.sample_factor(2,c);
-            row =  MCU_height * fix(id/Width);
-            col = MCU_width * mod(id,Width);
-            Htable = Decoder.dc_huff_tbl(Decoder.channel_info.dc_tbl_id(c)+1);
-
-            for j = 1:MCU_height
-                for k = 1:MCU_width
-                    %{ 
-                      specify id where result saved id coefficients,note
-                      that if there are multichannels in scan,interleaved
-                      mode is used else non-interleaved mode
-                    %}
-                    blk_idx = row*Width*MCU_width + col + k;
-
-                    % Huffman decode
-                    DIFF = DECODE(Htable);
-                    Decoder.LastDCVal(c) = Decoder.LastDCVal(c) + DIFF;
-                    Decoder.Coes{c}(1,blk_idx) = Decoder.LastDCVal(c);
-                end
-                row = row + 1;
-            end
+        for blkn = 1:Decoder.blks_in_MCU
+            ci = Decoder.member_ship(blkn);
+            Htable = Decoder.dc_huff_tbl(Decoder.dc_tbl_id(ci)+1);
+            blk_cnt = Decoder.dc_blk_id(mcu_cnt*Decoder.blks_in_MCU+blkn);
+            S = DECODE(Htable);
+            DIFF = bitshift(EXTEND(get_bits(S), S),Decoder.Al,'int16');
+            Decoder.LastDCVal(ci) = Decoder.LastDCVal(ci) + DIFF;
+            Decoder.Coes(ci,1,blk_cnt) = Decoder.LastDCVal(ci);
         end
     end
-
     function DecodeACFirst(mcu_cnt)
         %   =================================
         %    First decode of AC coefficients
         %   =================================
+        mcu_cnt = mcu_cnt + 1;
+        HTable = Decoder.ac_huff_tbl(Decoder.ac_tbl_id(Decoder.comp_id)+1);
 
-        % End of Band run length 
-        EOBRUN = Decoder.EOBRUN;
-        c = Decoder.channel_info.id;
-        HTable = Decoder.ac_huff_tbl(Decoder.channel_info.ac_tbl_id+1);
-        blks = Decoder.channel_info.blks_in_MCU;
-        
-        % if EOBRUN != 0,all left coefficient are 0 
-        if EOBRUN > 0
-            EOBRUN = EOBRUN - 1;
+        % End of Band run length,if EOBRUN != 0,all left coefficient are 0
+        if Decoder.EOBRUN > 0
+            Decoder.EOBRUN = Decoder.EOBRUN - 1;
         else
-            c1 = Decoder.channel_info.MCU_width;
-            c2 = Decoder.channel_info.MCU_height;
-            for i = 1:c1
-                for j = 1:c2
-                    blk_id = (i-1)*c2 + j;
-                    blk_cnt = mcu_cnt*blks + blk_id;
-                    K = Decoder.Ss+1;
-                    while K <= Decoder.Se+1
-                        RS = DECODE(HTable,0);
+            K = Decoder.Ss + 1;
+            while K <= Decoder.Se+1
+                RS = DECODE(HTable);
+                % run_length & code size
+                R = bitshift(RS,-4);
+                S = bitand(RS,2^4-1);
 
-                        % run_length & code size
-                        R = bitshift(RS,-4);          
-                        S = bitand(RS,2^4-1);
-                        
-                        if S == 0
-                            % code size == 0 means several continuous 0s.
-                            if R == 15
-                                % ZRL code
-                                K = K + 16;           
-                            else
-                                % note the method calucating EOURUN
-                                EOBRUN = bitshift(1,R) + get_bits(R)-1;
-                                break                
-                            end
-                        else
-                            % code size !=0 means non-zero coefficient
-                            % appeared.
-                            K = K + R;
-                            Temp = EXTEND(get_bits(S),S);
-                            Temp = bitshift(Temp,Decoder.Al,'int16');
-                            Decoder.Coes{c}(K,blk_cnt) = Temp;
-                            K = K + 1;
-                        end
+                if S == 0
+                    % code size == 0 means several continuous 0s.
+                    if R == 15
+                        % ZRL code
+                        K = K + 16;
+                    else
+                        % note the method calucating EOURUN
+                        Decoder.EOBRUN = bitshift(1,R) + get_bits(R)-1;
+                        break
                     end
+                else
+                    % code size !=0 means non-zero coefficient
+                    % appeared.
+                    K = K + R;
+                    Temp = EXTEND(get_bits(S),S);
+                    Temp = bitshift(Temp,Decoder.Al,'int16');
+                    Decoder.Coes(Decoder.comp_id,K,mcu_cnt) = Temp;
+                    K = K + 1;
                 end
             end
         end
-        Decoder.EOBRUN = EOBRUN;
     end
 
-    function DecodeDCRefine(id)
+    
+    function DecodeDCRefine(mcu_cnt)
         %   ================================
         %   Refine decode of  DC coefficient
         %   ================================
-        Width = Decoder.channel_info.MCUs_per_row;
-        P = bitshift(1,Decoder.Al);
-        for i = 1:Decoder.channel_info.channels
-            c = Decoder.channel_info.id(i);
-            MCU_width = Decoder.sample_factor(1,c);
-            MCU_height = Decoder.sample_factor(2,c);
-            row =  MCU_height * fix(id/Width);
-            col = MCU_width * mod(id,Width);
-            for j = 1:MCU_height
-                for k = 1:MCU_width
-                    blk_idx = row*Width*MCU_width + col + k;
-                    if get_bits(1)
-                        temp = Decoder.Coes{c}(1,blk_idx);
-                        if temp > 0
-                            Decoder.Coes{c}(1,blk_idx) = ...
-                                bitor(temp,P);
-                        else
-                            Decoder.Coes{c}(1,blk_idx) = ...
-                                bitor(temp + 2^8,P)-2^8;
-                        end
-                    end
-                end
-                row = row + 1;
+        P = 2^Decoder.Al;
+        for blkn = 1:Decoder.blks_in_MCU
+            ci = Decoder.member_ship(blkn);
+            blk_cnt = Decoder.dc_blk_id(mcu_cnt*Decoder.blks_in_MCU+blkn);
+            if get_bits(1)
+                Decoder.Coes(ci,1,blk_cnt) = bitor( ...
+                    Decoder.Coes(ci,1,blk_cnt),P,'int32');
             end
         end
     end
 
-    function DecodeACRefine(mcu_cnt)
+ function DecodeACRefine(mcu_cnt)
         %   ================================
-        %   Refine decode of AC coefficients.
+        %   Refine decode of AC coefficients,
+        %   One component decoded once.
         %   ================================
+        mcu_cnt = mcu_cnt + 1;
+
+        % End of Block
         EOBRUN = Decoder.EOBRUN;
-        c = Decoder.channel_info.id;
-        HTable = Decoder.ac_huff_tbl(Decoder.channel_info.ac_tbl_id+1);
-        blks = Decoder.channel_info.blks_in_MCU;
 
-        c1 = Decoder.channel_info.MCU_width;
-        c2 = Decoder.channel_info.MCU_height;
-        
+        % index of component
+        Id = Decoder.comp_id;
+
+        HTable = Decoder.ac_huff_tbl(Decoder.ac_tbl_id(Id)+1);
         P = bitshift(1,Decoder.Al);
+
+        K = 2;
         
-        for i = 0:c1-1
-            for j = 0:c2-1
-                % 当前MCU中的第几个block
-                blk_id = i*c2 + j + 1;   
-
-                % 全部block中的第几个block
-                blk_cnt = mcu_cnt*blks + blk_id;
-                
-                % 开始频带
-                K = Decoder.Ss + 1;
-
-                % 如果没有遇到end of band，则解码
-                if EOBRUN == 0
-                    while K <= Decoder.Se+1
-                        Temp = Decoder.Coes{c}(K,blk_cnt);
-                        RS = DECODE(HTable,0);
-                        R = fix(RS / 16);                    % run_length
-                        S = mod(RS , 16);                    % code size
-                        if S
-                            if(S~=1)
-                                error('Bad Huffman Code!');
-                            end
-                            if get_bits(1)
-                                S = P;
-                            else
-                                S = -P;
-                            end
-                        else
-                            if R~=15
-                                EOBRUN = 2 ^ R;
-                                if R
-                                    EOBRUN = EOBRUN + get_bits(R);
-                                end
-                                break
-                            end
+        % 如果没有遇到end of band，则解码当前block
+        if EOBRUN == 0
+            while K <= 64
+                RS = DECODE(HTable);
+                R = fix(RS / 16);                  
+                S = mod(RS , 16);
+                if S
+                    % 只要遇到ZZ（K）!= 0 & History(K)==0的情况就记为RS，同时
+                    % 用一个bit来表示  
+                    if(S ~= 1)
+                        % size of new coef should always be 1
+                        error('Corrupt JPEG data: bad Huffman code!');
+                    end
+                    if get_bits(1)
+                        % ================================================
+                        % Rule a. One additional bit codes the sign of 
+                        % newly non-zero coef,with a 1-bits codes positive 
+                        % sign and a 0-bit codes negative sign.
+                        % =================================================
+                        S = P;
+                    else
+                        S = -P;
+                    end
+                else
+                    % S == 0 means sevral continuous 0s.  
+                    if R ~= 15 
+                        % End of Block,Calc run_length.
+                        EOBRUN = 2 ^ R;
+                        if R
+                            EOBRUN = EOBRUN + get_bits(R);
                         end
-                        while K <= Decoder.Se+1
-                            % the refine value is depended on sign of
-                            % corresponding AC value.
-                            Temp = Decoder.Coes{c}(K,blk_cnt);
-                            if Temp ~= 0
-                                if get_bits(1)
-                                    if bitand(abs(Temp),P)
-                                        if Temp>0
-                                            Temp = bitor(Temp, P);
-                                        else
-                                            Temp = bitor(blk_id + 2^8,P)-2^8;
-                                        end
-                                    end
-                                end
-                            else
-                                R = R-1;
-                                if R < 0
-                                    break
-                                end
-                            end
-                            Decoder.Coes{c}(K,blk_cnt)=Temp;
-                            K = K + 1;
-                        end
-                        if S
-                            Temp = S;
-                        end
-                        Decoder.Coes{c}(K,blk_cnt)=Temp;
-                        K = K + 1;
+                        break
                     end
                 end
-                if EOBRUN >0
-                    while K <= Decoder.Se+1
-                        Temp = Decoder.Coes{c}(K,blk_cnt);
-                        if Temp ~=0
-                            if get_bits(1)
-                                if bitand(abs(Temp),P) ==0
-                                    if Temp >0
-                                        Temp = Temp + P;
-                                    else
-                                        Temp = Temp - P;
-                                    end
-                                end
-                            end
+                while K <= 64
+                    % the refine value is depended on sign of history val.
+                    % ===================================================
+                    % 注意这里R的计算没有考虑前一次解码结果不为0的系数，在统计
+                    % R的时候跳过了前一精度下不为0的系数。
+                    % ===================================================
+                    ThisCoef = Decoder.Coes(Id,K,mcu_cnt);
+                    if ThisCoef ~= 0
+                        AssignCoef();
+                    else
+                        R = R - 1;
+                        if R < 0
+                            break
                         end
-                        Decoder.Coes{c}(K,blk_cnt)=Temp;
-                        K = K+1;
                     end
-                    EOBRUN = EOBRUN - 1;
+                    Decoder.Coes(Id,K,mcu_cnt) = ThisCoef;
+                    K = K + 1;
                 end
-                Decoder.EOBRUN = EOBRUN;
+                if S
+                    ThisCoef = S;
+                    Decoder.Coes(Id,K,mcu_cnt) = ThisCoef;
+                end
+                K = K + 1;
+            end
+        end
+        
+        if EOBRUN > 0
+            %  ============================================================
+            %  Scan any remaining coefficient positions after the 
+            %  end-of-band (the last newly nonzero coefficient, if any).  
+            %  Append a correction bit to each already-nonzero coefficient. 
+            %  A correction bit is 1 if the absolute value of the 
+            %  coefficient must be increased.
+            %  ============================================================
+            while K <= 64
+                ThisCoef = Decoder.Coes(Id,K,mcu_cnt);
+                if ThisCoef ~= 0
+                    AssignCoef();
+                end
+                Decoder.Coes(Id,K,mcu_cnt) = ThisCoef;
+                K = K + 1;
+            end
+            EOBRUN = EOBRUN - 1;
+        end
+        Decoder.EOBRUN = EOBRUN;
+
+        function AssignCoef()
+            % Assign new coef to history existed coef.
+            if get_bits(1)
+                if bitand(abs(ThisCoef),P) == 0
+                    if ThisCoef > 0
+                        ThisCoef = ThisCoef + P;
+                    else
+                        ThisCoef = ThisCoef - P;
+                    end
+                end
             end
         end
     end
-    function S = DECODE(Htable,isDC)
+
+    function S = DECODE(Htable)
         %{
             Obtaining the value of symbol encoded by next bits from Huffman
             table
@@ -366,9 +350,7 @@ end
             Procedure which returns the 8-bit value associated with the next
             Huffman code in the compressed image data.
         %}
-        if ~exist("isDC",'var')
-            isDC = true;
-        end
+
         if Decoder.bits_in_buffer < HUFF_LOOKAHEAD
             jpeg_fill_buffer();
         end
@@ -392,10 +374,7 @@ end
             % method.
             S = jpeg_huff_decode(Htable,nb);
         end
-        if isDC
-            DIFF = get_bits(S);
-            S = bitshift(EXTEND(DIFF, S),Decoder.Al,'int16');
-        end
+        
     end
 
     function ParseSOF()
@@ -408,56 +387,92 @@ end
         ImgInfo.Height = double(ReadTwoBytes());
         ImgInfo.Width = double(ReadTwoBytes());
         ImgInfo.Channels = ReadOneByte();
+        if (ImgInfo.Height <= 0 || ImgInfo.Width <= 0 ||...
+                ImgInfo.Channels <= 0)
+            error('"Empty JPEG image (DNL not supported)')
+        end
+        switch ImgInfo.Precision
+            case 8
+                type = 'uint8';
+            case 16
+                type = 'uint16';
+        end
+        ImgInfo.Img = zeros(ImgInfo.Height,ImgInfo.Width,ImgInfo.Channels,type);
         data_length = data_length - 6;
         fprintf('Image precision is %d bit,with shape of %d x %d x %d.\n',...
             ImgInfo.Precision,ImgInfo.Height,ImgInfo.Width,ImgInfo.Channels);
-        Idx = 1;
+        
         if data_length ~= (ImgInfo.Channels * 3)
             error("Bogus marker length");
         end
+        Decoder.init_blk_id = ones(1,ImgInfo.Channels);
+        Idx = 1;
         for i = 1:ImgInfo.Channels
             % 通道编号和采样系数
             c_id = ReadOneByte();
             sample_factor = ReadOneByte();
-            sf_h = bitshift(sample_factor,-4);
-            sf_v = bitand(sample_factor,2^4-1);
-            Decoder.sample_factor(:,c_id)=[sf_h,sf_v];
+            sf_w = bitshift(sample_factor,-4);
+            sf_h = bitand(sample_factor,2^4-1);
+            Decoder.sample_factor(:,c_id)=[sf_w,sf_h];
 
             % 量化表编号
             Decoder.quanti_tbl_idx(c_id) = ReadOneByte() + 1;
-
+            
             % 各通道信息
-            c1 = sf_v*sf_h;
-            Decoder.blks_in_MCU(i) = c1;
+            c1 = sf_h*sf_w;
+
             for j = 1:c1
                 Decoder.member_ship(Idx) = i;
                 Idx = Idx + 1;
             end
-            data_length = data_length-3;
+            data_length = data_length - 3;
         end
         
-        sf_h_max = max(Decoder.sample_factor(1,:));
-        sf_v_max = max(Decoder.sample_factor(2,:));
-        for i = 1:ImgInfo.Channels
-            sf_h = sf_h_max/Decoder.sample_factor(1,i);
-            sf_v = sf_v_max/Decoder.sample_factor(2,i);
-            c1 = ceil(ImgInfo.Width/8/sf_h);
-            c2 = ceil(ImgInfo.Height/8/sf_v);
-            Decoder.blks_per_row(i) = c1;
-            Decoder.blks_per_col(i) = c2;
-            Decoder.Coes{i} = zeros(JPEG_BLOCK_SIZE,c1*c2);
+        sf_h = max(Decoder.sample_factor(1,:));
+        sf_w = max(Decoder.sample_factor(2,:));
+
+        DownSam = [sf_h;sf_w]./Decoder.sample_factor;
+        Decoder.blks_per_row = ceil(ImgInfo.Width./DownSam(1,:)/8);
+        Decoder.blks_per_col = ceil(ImgInfo.Height./DownSam(2,:)/8);
+        Decoder.blks_per_comp = Decoder.blks_per_col.*Decoder.blks_per_row;
+        Decoder.MCUs_per_row = ceil(ImgInfo.Width/8/sf_w);
+        Decoder.MCUs_per_col = ceil(ImgInfo.Height/8/sf_h);
+
+        Decoder.blks_in_MCU = sum(prod(Decoder.sample_factor));
+        Decoder.Coes = zeros(ImgInfo.Channels,JPEG_BLOCK_SIZE,max(Decoder.blks_per_comp));
+        
+        % 这里保存dc系数解码时的block排列顺序，用于应对多通道编码的交错存储模式
+        Decoder.dc_blk_id = ones(1,sum(Decoder.blks_per_comp));
+
+        blkn = 1;
+        for ROW = 0:Decoder.MCUs_per_col - 1
+            for COL = 0:Decoder.MCUs_per_row - 1
+                for ci = 1:ImgInfo.Channels
+                    McuWidth = Decoder.sample_factor(1,ci);
+                    McuHeight = Decoder.sample_factor(2,ci);
+                    for r = 0:McuHeight - 1
+                        for c = 0:McuWidth - 1
+                            row = ROW * McuHeight + r;
+                            col = COL * McuWidth + c;
+                            blk_id = row * Decoder.blks_per_row(ci) + col + 1;
+                            Decoder.dc_blk_id(blkn) = blk_id;
+                            blkn = blkn + 1;
+                        end
+                    end
+                end
+            end
         end
-        Decoder.MCUs_per_row = min(Decoder.blks_per_row);
-        Decoder.MCUs_per_col = min(Decoder.blks_per_col);
+        
         assert (data_length == 0,'Bad Data Length of SOF.')
         Decoder.next_marker = 0;
     end
+
     function ParseAPPn()
         %{
             Parse APPn data segment,this is about some comment infomation
         %}
         data_length = int32(ReadTwoBytes());
-        DataSegment = ReadNBytes(jpegfile,data_length - 2);
+        DataSegment = ReadNBytes(data_length - 2);
         file_format = char();
 
         % file save format,usually JFIF
@@ -475,6 +490,7 @@ end
             fprintf('File is of format %s.\n',file_format);
         end
     end
+
     function ParseDQT()
         %{
             Function parsing quantization tables.Quantization tbales
@@ -493,9 +509,9 @@ end
             identifier = bitand(c,2^4-1);
             data_length = data_length -1;
             if dqt_precision == 0
-                Qtbl = ReadNBytes(jpegfile,64);
+                Qtbl = ReadNBytes(64);
             else
-                Qtbl = ReadNBytes(jpegfile,64,'uint16');
+                Qtbl = ReadNBytes(64,2);
             end
             data_length = data_length - 64;
 
@@ -504,6 +520,7 @@ end
         end
         Decoder.next_marker = 0;
     end
+
     function ParseSOS()
         %{
             SOS data segment,which includes channel information to be
@@ -515,59 +532,47 @@ end
         % Initialization of channel infomation
         ResetDecoder();
 
-        data_length = int32(ReadTwoBytes());
+        data_length = ReadTwoBytes();
         channels = ReadOneByte();
-        Decoder.channel_info.channels = channels;
+
+        Decoder.channels = channels;
         data_length = data_length - 3;
-        if channels == 1
-            %{
-                non-interleved save mode used if simple component in scan 
-            %}
 
-            % channel id and huffman table id in scan
+        for i = 1:channels
             c = ReadOneByte();
-            id = ReadOneByte();
-            Decoder.channel_info.id = c;
-            Decoder.channel_info.dc_tbl_id = bitshift(id,-4);
-            Decoder.channel_info.ac_tbl_id = bitand(id,2^4-1);
+            Decoder.comp_id(i) = c;
 
-            % blocks in width/height
-            c1 = Decoder.blks_per_row(c);
-            c2 = Decoder.blks_per_col(c);
-            
-            % In non-interleaved scan,num of MCUs equals to num of
-            % blocks,only 1 block in each MCU
-            Decoder.channel_info.MCUs_per_row = c1;
-            Decoder.channel_info.MCUs_per_col = c2;
-            Decoder.channel_info.MCUs = c1*c2;
-            Decoder.channel_info.MCU_width = 1;
-            Decoder.channel_info.MCU_height = 1;
-            Decoder.channel_info.blks_in_MCU = 1;
+            id = ReadOneByte();
+            Decoder.dc_tbl_id(c) = bitshift(id,-4);
+            Decoder.ac_tbl_id(c) = bitand(id,2^4-1);
             data_length = data_length - 2;
+        end
+        
+        if channels == 1
+            Decoder.MCUs = Decoder.blks_per_comp(Decoder.comp_id);
         else
-            % interleaved save mode for multi channels in one scan
-            for i = 1:channels
-                c = ReadOneByte();
-                id = ReadOneByte();
-                Decoder.channel_info.id(i) = c;
-                Decoder.channel_info.dc_tbl_id(c)= bitshift(id,-4);
-                Decoder.channel_info.ac_tbl_id(c) = bitand(id,2^4-1);
-                data_length = data_length-2;
-            end
-            % num of blocks in MCU is defined by Sample factors of each
-            % component
-            Decoder.channel_info.MCUs_per_row = Decoder.MCUs_per_row;
-            Decoder.channel_info.MCUs_per_col = Decoder.MCUs_per_col;
-            Decoder.channel_info.blks_in_MCU = sum(Decoder.blks_in_MCU);
+            Decoder.MCUs = Decoder.MCUs_per_col*Decoder.MCUs_per_row;
         end
         % start and end band in progressive mode
         Decoder.Ss = ReadOneByte();
         Decoder.Se = ReadOneByte();
+        if Decoder.Ss > Decoder.Se || Decoder.Se >= JPEG_BLOCK_SIZE
+            error('Bad Ss=%d / Se=%d',Decoder.Ss,Decoder.Se)
+        end
 
         % the highest/lowest bit of approximation mode
-        Decoder.Al = ReadFourBits();
-        Decoder.Ah = ReadFourBits();
-        data_length = data_length-3;
+        NewByte = ReadOneByte();
+        Decoder.Ah = bitshift(NewByte,-4);
+        Decoder.Al = bitand(NewByte,15);
+        
+        if (Decoder.Ah ~= 0)
+    		% Successive approximation refinement scan: must have Al = Ah-1
+            if Decoder.Al ~= Decoder.Ah - 1
+                error('Bad Ah(%d) / Al(%d)',Decoder.Ah,Decoder.Al)
+            end
+        end
+        
+        data_length = data_length - 3;
         
         % specify docode function vias readed parameters
         if Decoder.Ss == 0
@@ -586,29 +591,7 @@ end
         assert(data_length==0,"Bad Data Length of SOS.")
         Decoder.next_marker = 0;
     end
-    function [VALUE] = RECEIVE(SSSS)
-        %{
-            Read code_length bits additional value
 
-            Procedure which places the next SSSS bits of the entropy-coded
-            segment into the LSB of DIFF as additional bits.It calls the
-            NEXTBIT and returns the value of DIFF to the calling procedure.
-
-            Args
-                SSSS Code size with which the value of DIFF is encoded
-
-            Returns
-                VALUE: DIFF encoded in two's complement
-        %}
-        VALUE=0;
-        for i = 1:SSSS
-            if Decoder.next_marker == 0
-                VALUE = bitshift(VALUE,1) + NEXTBIT();
-            else
-                break;
-            end
-        end
-    end
     function [V] = EXTEND(V, T)
         %{
             Extending the sign bit of a decoded value in V
@@ -628,39 +611,27 @@ end
             V = V - power(2,T)+1;
         end
     end
-    function Bit = NEXTBIT()
-        %{
-            Read one bit,include processing makers.
-        %}
+
+    function Byte = GetNewByte()
+        Byte = 0;
         if ~Decoder.next_marker
-            C = Decoder.bitsleft;
-            if C == 0
-                Decoder.unusebits = ReadOneByte();
-                if Decoder.unusebits == hex2dec('FF')
-                    nextbyte = ReadOneByte();
-                    while nextbyte == hex2dec('FF')
-                        nextbyte = ReadOneByte();
-                    end
-                    if nextbyte == 0
-                        C = 8;
-                    elseif ismember(nextbyte,[196,217,218])
-                        Decoder.next_marker = nextbyte;
-                        Decoder.unusebits = -1;
-                        Bit = 0;
-                        return;
-                    else
-                        error('Illegal marker!')
-                    end
+            Byte = ReadOneByte();
+            if Byte == hex2dec('FF')
+                NextByte = ReadOneByte();
+                while NextByte == hex2dec('FF')
+                    NextByte = ReadOneByte();
+                end
+                if NextByte == 0
+                    return;
+                elseif ismember(NextByte,[196,217,218])
+                    Decoder.next_marker = NextByte;
                 else
-                    C = 8;
+                    error('Illegal marker!')
                 end
             end
-            C = C - 1;
-            Bit = bitshift(Decoder.unusebits,-C);
-            Decoder.unusebits = mod(Decoder.unusebits,2^C);
-            Decoder.bitsleft = C;
         end
     end
+    
     function ParseDHT()
         %{
             Parse huffman table.
@@ -698,6 +669,7 @@ end
         assert(data_length == 0,('Counts of bits left must be 0.'))
         Decoder.next_marker = 0;
     end
+
     function dtbl = jpeg_make_derived_tbl(isDC, htbl)
         %{
             Note that huffsize() and huffcode() are filled in code-length order,
@@ -712,6 +684,8 @@ end
         % Figure C.1: make table of Huffman code length for each symbol
 
         index = 0;
+        huffsize = zeros(1,sum(htbl.bits)+1);
+        huffcode = zeros(1,sum(htbl.bits));
         for l = 2:17
             cnt = htbl.bits(l);
             if cnt < 0 || index + cnt > 256   % protect against table overrun
@@ -817,6 +791,7 @@ end
             end
         end
     end
+
     function re = jpeg_huff_decode(htbl,l)
         % HUFF_DECODE has determined that the code is at least min_bits 
         % bits long, so fetch that many bits in one swoop. 
@@ -830,30 +805,72 @@ end
 
         % With garbage input we may reach the sentinel value l = 17. 
         if (l > 16)
-            warning("Corrupt JPEG data: bad Huffman code");
+            error("Corrupt JPEG data: bad Huffman code");
         end
         re =  htbl.pub.huffval(code + htbl.valoffset(l+1));
-
     end
+
     function jpeg_fill_buffer()
-        [buffer,nbits] = deal(Decoder.temp_buffer,Decoder.bits_in_buffer);
+        buffer = Decoder.temp_buffer;
+        nbits = Decoder.bits_in_buffer;
         while nbits <= 24   % number of bits read-in each time less than 32
-            buffer = bitor(bitshift(buffer,HUFF_LOOKAHEAD),RECEIVE(8));
+            NewByte = GetNewByte();
+            buffer = bitor(bitshift(buffer,HUFF_LOOKAHEAD),NewByte);
             nbits = nbits + 8;
         end
-        [Decoder.temp_buffer,Decoder.bits_in_buffer] = deal(buffer,nbits);
+        Decoder.temp_buffer=buffer;
+        Decoder.bits_in_buffer=nbits;
     end
+
     function re = get_bits(n)
         % read-in n bits data
         if Decoder.bits_in_buffer < n
             jpeg_fill_buffer()
         end
-        [buffer,nbits] = deal(Decoder.temp_buffer,Decoder.bits_in_buffer);
+        buffer = Decoder.temp_buffer;
+        nbits = Decoder.bits_in_buffer;
         nbits = nbits-n;
         re = bitshift(buffer,-nbits);
         buffer = bitand(buffer,2^nbits-1);
-        [Decoder.temp_buffer,Decoder.bits_in_buffer] = deal(buffer,nbits);
+        Decoder.temp_buffer = buffer;
+        Decoder.bits_in_buffer = nbits;
     end
+
+     function GenerateImage()
+        %{
+            enerate and Display Image from Decoded Coefficients.
+        %}
+        VMax = max(Decoder.sample_factor(1,:));
+        HMax = max(Decoder.sample_factor(2,:));
+        SF = [VMax./Decoder.sample_factor(1,:);HMax./Decoder.sample_factor(2,:)];
+        
+        blk_cnt = 1;
+        for ROW = 0:Decoder.MCUs_per_col-1
+            for COL = 0:Decoder.MCUs_per_row-1
+                MCU = zeros(8*VMax,8*HMax,ImgInfo.Channels);
+                for ci = 1:ImgInfo.Channels
+                    McuInComp = zeros(8*Decoder.sample_factor(1,ci),8*Decoder.sample_factor(2,ci));
+                    for r = 0:Decoder.sample_factor(1,ci) - 1
+                        for c = 0:Decoder.sample_factor(2,ci) - 1
+                            index = Decoder.dc_blk_id(blk_cnt);
+                            DQTable = Decoder.dqt_ids{Decoder.quanti_tbl_idx(ci)};
+                            block = Decoder.Coes(ci,:,index);
+                            temp = inverse_zigzag(block);
+                            temp = idct2(temp .* DQTable)+ 2 ^ (ImgInfo.Precision - 1);
+                            McuInComp(r*8+1:(r+1)*8,c*8+1:(c+1)*8) = temp;
+                            blk_cnt = blk_cnt + 1;
+                        end
+                    end
+                    MCU(:,:,ci) = UPSAMPLE(McuInComp,SF(:,ci));
+                end
+                ImgInfo.Img(ROW*8*VMax+1:(ROW+1)*8*VMax,COL*8*HMax+1:(COL+1)*8*HMax,:) = MCU;
+            end
+        end
+        if ImgInfo.Channels == 3
+            ImgInfo.Img = yuv2rgb(ImgInfo.Img);
+        end
+        imshow(ImgInfo.Img);
+     end
 end
 
 
